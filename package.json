@@ -4,6 +4,7 @@
   "description": "View and extract ZIP, 7Z, TAR, and various compressed archive files",
   "version": "2.1.0",
   "publisher": "Takeshi-Fuchi",
+  "icon": "images/icon.png",
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -90,17 +91,26 @@
     "compile": "webpack",
     "watch": "webpack --watch",
     "package": "webpack --mode production --devtool hidden-source-map",
+    "test": "TS_NODE_PROJECT=tsconfig.test.json mocha",
+    "test:unit": "TS_NODE_PROJECT=tsconfig.test.json mocha --spec test/suite/utils.test.ts",
+    "test:archive": "TS_NODE_PROJECT=tsconfig.test.json mocha --spec test/suite/archive.test.ts",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts"
   },
   "devDependencies": {
+    "@types/jsdom": "^28.0.3",
+    "@types/mocha": "^10.0.10",
     "@types/node": "^18.0.0",
     "@types/tar": "^6.1.5",
     "@types/vscode": "^1.80.0",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
     "eslint": "^8.0.0",
+    "jsdom": "^29.1.1",
+    "mocha": "^11.7.6",
     "ts-loader": "^9.5.4",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
     "typescript": "^5.0.0",
     "webpack": "^5.102.1",
     "webpack-cli": "^6.0.1"
