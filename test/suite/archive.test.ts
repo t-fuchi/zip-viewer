@@ -87,9 +87,7 @@ describe('TAR archive loading', () => {
         assertValidEntries(provider.archiveEntries, 'out.tar.bz2');
     });
 
-    // .tar.Z uses legacy LZW compression (Unix compress). Node's zlib.createUnzip()
-    // only handles gzip/deflate, not LZW — this is a known limitation.
-    it.skip('loads out.tar.Z (compress format — LZW not supported by zlib)', async () => {
+    it('loads out.tar.Z (LZW via bundled 7z binary)', async () => {
         await provider.loadTarEntries(path.join(TEST_DIR, 'out.tar.Z'));
         assertValidEntries(provider.archiveEntries, 'out.tar.Z');
     });

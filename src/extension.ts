@@ -7,6 +7,7 @@ import * as lzma from 'lzma-native';
 import * as zlib from 'zlib';
 import { pipeline, Readable, Transform } from 'stream';
 import { promisify } from 'util';
+import { spawn } from 'child_process';
 import bz2 = require('unbzip2-stream');
 import * as Seven from 'node-7z';
 import * as zstd from '@mongodb-js/zstd';
@@ -160,8 +161,13 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
             case '.tar.Z':
             case '.taz':
-            case '.taZ':
-                return fileStream.pipe(zlib.createUnzip());
+            case '.taZ': {
+                // zlib.createUnzip() only handles gzip/deflate, not LZW (.Z).
+                // Use the bundled 7z binary to decompress to stdout instead.
+                fileStream.destroy();
+                const child = spawn(this.get7zPath(), ['e', '-so', filePath]);
+                return child.stdout as unknown as Readable;
+            }
 
             case '.tar.lz':
             case '.tlz':
@@ -233,7 +239,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
             await new Promise<void>((resolve, reject) => {
                 sevenZip.on('data', (data: any) => {
                     if (cancellationToken?.isCancellationRequested) {
-                        sevenZip.kill();
+                        sevenZip.destroy();
                         reject(new Error('Cancelled'));
                         return;
                     }
@@ -549,6 +555,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         return new Promise<string | null>((resolve, reject) => {
             const extension = this.getExtension(this.archiveFilePath!);
             const decompressedStream = this.getDecompressionStream(extension, this.archiveFilePath!);
+            decompressedStream.on('error', reject);
             decompressedStream.pipe(
                 tar.t({
                     onentry: entry => {
@@ -571,6 +578,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         await new Promise<void>((resolve, reject) => {
             const extension = this.getExtension(this.archiveFilePath!);
             const decompressedStream = this.getDecompressionStream(extension, this.archiveFilePath!);
+            decompressedStream.on('error', reject);
             decompressedStream.pipe(
                 tar.t({
                     onentry: entry => {
@@ -782,6 +790,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         return new Promise<PreviewResult | null>((resolve, reject) => {
             const extension = this.getExtension(this.archiveFilePath!);
             const decompressedStream = this.getDecompressionStream(extension, this.archiveFilePath!);
+            decompressedStream.on('error', reject);
 
             decompressedStream.pipe(
                 tar.t({
