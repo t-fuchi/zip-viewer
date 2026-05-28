@@ -1278,7 +1278,7 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
             });
 
             if (file.type !== 'Directory') {
-                if (password === undefined || !(await this.checkPassword(file, password))) {
+                if (!(await this.checkPassword(file, password ?? ''))) {
                     password = await this.promptForPassword();
                     if (!password || !(await this.checkPassword(file, password))) {
                         throw new Error('Invalid password');
