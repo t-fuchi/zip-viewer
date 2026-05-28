@@ -117,8 +117,10 @@
   },
   "dependencies": {
     "@mongodb-js/zstd": "^7.0.0",
+    "@types/markdown-it": "^14.1.2",
     "7zip-bin": "^5.2.0",
     "lzma-native": "^8.0.6",
+    "markdown-it": "^14.2.0",
     "node-7z": "^3.0.0",
     "tar": "^6.1.15",
     "unbzip2-stream": "^1.4.3",

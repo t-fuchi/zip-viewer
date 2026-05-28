@@ -10,13 +10,15 @@ import { promisify } from 'util';
 import bz2 = require('unbzip2-stream');
 import * as Seven from 'node-7z';
 import * as zstd from '@mongodb-js/zstd';
+import MarkdownIt = require('markdown-it');
 const sevenBin = require('7zip-bin');
 
 const pipelineAsync = promisify(pipeline);
 
 type PreviewResult =
     | { kind: 'text'; content: string }
-    | { kind: 'image'; base64: string; mimeType: string };
+    | { kind: 'image'; base64: string; mimeType: string }
+    | { kind: 'markdown'; html: string };
 
 interface ArchiveEntry {
     name: string;
@@ -47,10 +49,8 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
     private previewStartTime: number = 0;
     private minPreviewDuration: number = 300; // 最小300ms表示
 
-    /** 直近のプレビューリクエストID(増加するカウンタ) */
+    /** 直近のプレビューリクエストID — 連続リクエスト時に古い結果を破棄するため */
     private previewRequestId: number = 0;
-    /** 現在プレビューすべき状態かどうか(マウス押下中など) */
-    private isPreviewActive: boolean = false;
 
     constructor(private readonly context: vscode.ExtensionContext) { }
 
@@ -104,16 +104,12 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
             async (message) => {
                 if (message.command === 'previewFile') {
                     const fileUri = message.fileUri;
-
-                    // 新しいプレビューリクエストを発行
                     const requestId = ++this.previewRequestId;
-                    this.isPreviewActive = true;
 
                     const result = await this.previewFile(fileUri);
 
-                    // マウスがすでに離れている(= closePreview 済み)場合や、
-                    // これより新しいリクエストがある場合は何もしない
-                    if (!this.isPreviewActive || requestId !== this.previewRequestId) {
+                    // より新しいリクエストが来ていた場合は破棄
+                    if (requestId !== this.previewRequestId) {
                         return;
                     }
 
@@ -121,8 +117,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                         this.showPreviewPanel(fileUri, result);
                     }
                 } else if (message.command === 'closePreview') {
-                    // 現在のプレビューはもう無効
-                    this.isPreviewActive = false;
+                    this.previewRequestId++; // 読み込み中のプレビューをキャンセル
                     this.closePreviewPanel();
                 } else if (message.command === 'extractFile') {
                     await this.extractFile(message.fileUri);
@@ -460,6 +455,143 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         this.closePreviewPanel();
     }
 
+    private isMarkdownFile(filename: string): boolean {
+        return ['.md', '.markdown'].includes(path.extname(filename).toLowerCase());
+    }
+
+    private resolveArchivePath(mdFilePath: string, imgPath: string): string {
+        if (imgPath.startsWith('http://') || imgPath.startsWith('https://') || imgPath.startsWith('data:')) {
+            return imgPath;
+        }
+        const mdDir = mdFilePath.includes('/') ? mdFilePath.substring(0, mdFilePath.lastIndexOf('/')) : '';
+        const combined = mdDir ? `${mdDir}/${imgPath}` : imgPath;
+        const parts = combined.split('/');
+        const resolved: string[] = [];
+        for (const part of parts) {
+            if (part === '..') resolved.pop();
+            else if (part !== '.' && part !== '') resolved.push(part);
+        }
+        return resolved.join('/');
+    }
+
+    private extractImageRefs(content: string, mdFilePath: string): string[] {
+        const regex = /!\[[^\]]*\]\(([^)\s]+)[^)]*\)/g;
+        const refs = new Set<string>();
+        let match: RegExpExecArray | null;
+        while ((match = regex.exec(content)) !== null) {
+            const rawSrc = match[1];
+            if (!rawSrc.startsWith('http') && !rawSrc.startsWith('data:')) {
+                refs.add(this.resolveArchivePath(mdFilePath, rawSrc));
+            }
+        }
+        return [...refs];
+    }
+
+    private async renderMarkdownWithImages(
+        content: string,
+        mdFilePath: string,
+        loadImage: (archivePath: string) => Promise<{ base64: string; mimeType: string } | null>
+    ): Promise<string> {
+        const regex = /!\[([^\]]*)\]\(([^)\s]+)([^)]*)\)/g;
+        const rawToDataUri = new Map<string, string>();
+
+        let m: RegExpExecArray | null;
+        while ((m = regex.exec(content)) !== null) {
+            const rawSrc = m[2];
+            if (!rawSrc.startsWith('http') && !rawSrc.startsWith('data:') && !rawToDataUri.has(rawSrc)) {
+                const archivePath = this.resolveArchivePath(mdFilePath, rawSrc);
+                const img = await loadImage(archivePath);
+                rawToDataUri.set(rawSrc, img ? `data:${img.mimeType};base64,${img.base64}` : rawSrc);
+            }
+        }
+
+        const processed = content.replace(/!\[([^\]]*)\]\(([^)\s]+)([^)]*)\)/g, (_, alt, src, rest) => {
+            const uri = rawToDataUri.get(src);
+            return `![${alt}](${uri && uri !== src ? uri : src}${rest})`;
+        });
+
+        const md = new MarkdownIt({ html: false, linkify: true });
+        return md.render(processed);
+    }
+
+    private async readZipFileAsText(file: any, password?: string): Promise<string> {
+        const stream = file.stream(password ?? '');
+        const chunks: Buffer[] = [];
+        await new Promise<void>((resolve, reject) => {
+            stream.on('data', (c: Buffer) => chunks.push(c));
+            stream.on('end', resolve);
+            stream.on('error', (err: Error) => {
+                if (err.message !== 'unexpected end of file') reject(err); else resolve();
+            });
+        });
+        return Buffer.concat(chunks).toString('utf8');
+    }
+
+    private async loadImageFromZip(imagePath: string, password?: string): Promise<{ base64: string; mimeType: string } | null> {
+        try {
+            const directory = await unzipper.Open.file(this.archiveFilePath!);
+            const file = directory.files.find((f: any) => f.path === imagePath);
+            if (!file) return null;
+            const stream = file.stream(password ?? '');
+            const chunks: Buffer[] = [];
+            await new Promise<void>((resolve, reject) => {
+                stream.on('data', (c: Buffer) => chunks.push(c));
+                stream.on('end', resolve);
+                stream.on('error', (err: Error) => {
+                    if (err.message !== 'unexpected end of file') reject(err); else resolve();
+                });
+            });
+            return { base64: Buffer.concat(chunks).toString('base64'), mimeType: this.getMimeType(imagePath) };
+        } catch { return null; }
+    }
+
+    private async readTextFromTar(fileUri: string): Promise<string | null> {
+        return new Promise<string | null>((resolve, reject) => {
+            const extension = this.getExtension(this.archiveFilePath!);
+            const decompressedStream = this.getDecompressionStream(extension, this.archiveFilePath!);
+            decompressedStream.pipe(
+                tar.t({
+                    onentry: entry => {
+                        if (entry.path === fileUri) {
+                            const chunks: Buffer[] = [];
+                            entry.on('data', (c: Buffer) => chunks.push(c));
+                            entry.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+                            entry.on('error', reject);
+                        }
+                    }
+                }) as any
+            ).on('finish', () => resolve(null)).on('error', reject);
+        });
+    }
+
+    private async loadImagesFromTar(imagePaths: string[]): Promise<Map<string, { base64: string; mimeType: string }>> {
+        const result = new Map<string, { base64: string; mimeType: string }>();
+        if (imagePaths.length === 0) return result;
+        const remaining = new Set(imagePaths);
+        await new Promise<void>((resolve, reject) => {
+            const extension = this.getExtension(this.archiveFilePath!);
+            const decompressedStream = this.getDecompressionStream(extension, this.archiveFilePath!);
+            decompressedStream.pipe(
+                tar.t({
+                    onentry: entry => {
+                        if (remaining.has(entry.path)) {
+                            remaining.delete(entry.path);
+                            const chunks: Buffer[] = [];
+                            entry.on('data', (c: Buffer) => chunks.push(c));
+                            entry.on('end', () => {
+                                result.set(entry.path, {
+                                    base64: Buffer.concat(chunks).toString('base64'),
+                                    mimeType: this.getMimeType(entry.path)
+                                });
+                            });
+                        }
+                    }
+                }) as any
+            ).on('finish', resolve).on('error', reject);
+        });
+        return result;
+    }
+
     private isImageFile(filename: string): boolean {
         const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico', '.tif', '.tiff', '.avif'];
         const ext = path.extname(filename).toLowerCase();
@@ -503,9 +635,19 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 return null;
             }
 
+            const produceResult = async (pw: string | undefined): Promise<PreviewResult> => {
+                if (this.isMarkdownFile(fileUri)) {
+                    const content = await this.readZipFileAsText(file, pw);
+                    const html = await this.renderMarkdownWithImages(content, fileUri,
+                        imgPath => this.loadImageFromZip(imgPath, pw));
+                    return { kind: 'markdown', html };
+                }
+                return this.loadFilePreview(file, fileUri, pw);
+            };
+
             let password: string | undefined = this.savedPasswords[this.archiveFilePath!];
             if (await this.checkPassword(file, password ?? '')) {
-                return await this.loadFilePreview(file, fileUri, password);
+                return await produceResult(password);
             }
 
             while (true) {
@@ -516,7 +658,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
                 if (await this.checkPassword(file, password)) {
                     this.savedPasswords[this.archiveFilePath!] = password;
-                    return await this.loadFilePreview(file, fileUri, password);
+                    return await produceResult(password);
                 } else {
                     vscode.window.showErrorMessage('Password is incorrect. Please try again.');
                 }
@@ -534,33 +676,82 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
             const config = vscode.workspace.getConfiguration('zipViewer');
             const previewLineCount = config.get<number>('previewLineCount') ?? 20;
 
-            const tempDir = fs.mkdtempSync(path.join(require('os').tmpdir(), '7z-preview-'));
-            const sevenZip = Seven.extractFull(this.archiveFilePath!, tempDir, {
-                $bin: this.get7zPath(),
-                $raw: [fileUri]
-            });
+            let password: string | undefined = this.savedPasswords[this.archiveFilePath!];
 
-            await new Promise<void>((resolve, reject) => {
-                sevenZip.on('end', () => resolve());
-                sevenZip.on('error', reject);
-            });
+            while (true) {
+                const tempDir = fs.mkdtempSync(path.join(require('os').tmpdir(), '7z-preview-'));
+                let extractFailed = false;
 
-            const extractedFilePath = path.join(tempDir, fileUri);
-            if (fs.existsSync(extractedFilePath)) {
-                let result: PreviewResult;
-                if (this.isImageFile(fileUri)) {
-                    const buf = fs.readFileSync(extractedFilePath);
-                    result = { kind: 'image', base64: buf.toString('base64'), mimeType: this.getMimeType(fileUri) };
-                } else {
-                    const content = fs.readFileSync(extractedFilePath, 'utf8');
-                    result = { kind: 'text', content: content.split('\n').slice(0, previewLineCount).join('\n') };
+                try {
+                    // Always pass -p<password> — even empty — to prevent 7z from
+                    // waiting for interactive stdin input on encrypted archives.
+                    const sevenZip = Seven.extractFull(this.archiveFilePath!, tempDir, {
+                        $bin: this.get7zPath(),
+                        $raw: [fileUri, `-p${password ?? ''}`]
+                    });
+                    await new Promise<void>((resolve, reject) => {
+                        sevenZip.on('end', resolve);
+                        sevenZip.on('error', reject);
+                    });
+                } catch {
+                    extractFailed = true;
                 }
-                fs.rmSync(tempDir, { recursive: true, force: true });
-                return result;
-            }
 
-            fs.rmSync(tempDir, { recursive: true, force: true });
-            return null;
+                const extractedFilePath = path.join(tempDir, fileUri);
+
+                if (!extractFailed && fs.existsSync(extractedFilePath)) {
+                    if (password) this.savedPasswords[this.archiveFilePath!] = password;
+
+                    let result: PreviewResult;
+                    if (this.isImageFile(fileUri)) {
+                        const buf = fs.readFileSync(extractedFilePath);
+                        result = { kind: 'image', base64: buf.toString('base64'), mimeType: this.getMimeType(fileUri) };
+                    } else if (this.isMarkdownFile(fileUri)) {
+                        const mdContent = fs.readFileSync(extractedFilePath, 'utf8');
+                        const imageRefs = this.extractImageRefs(mdContent, fileUri);
+                        if (imageRefs.length > 0) {
+                            await new Promise<void>(res => {
+                                const sz = Seven.extractFull(this.archiveFilePath!, tempDir, {
+                                    $bin: this.get7zPath(),
+                                    $raw: [...imageRefs, `-p${password ?? ''}`]
+                                });
+                                sz.on('end', res);
+                                sz.on('error', () => res());
+                            });
+                        }
+                        const html = await this.renderMarkdownWithImages(mdContent, fileUri, async archivePath => {
+                            const p = path.join(tempDir, archivePath);
+                            if (fs.existsSync(p)) {
+                                const buf = fs.readFileSync(p);
+                                return { base64: buf.toString('base64'), mimeType: this.getMimeType(archivePath) };
+                            }
+                            return null;
+                        });
+                        result = { kind: 'markdown', html };
+                    } else {
+                        const content = fs.readFileSync(extractedFilePath, 'utf8');
+                        result = { kind: 'text', content: content.split('\n').slice(0, previewLineCount).join('\n') };
+                    }
+                    fs.rmSync(tempDir, { recursive: true, force: true });
+                    return result;
+                }
+
+                fs.rmSync(tempDir, { recursive: true, force: true });
+
+                if (!extractFailed) {
+                    // Extraction succeeded but file was not found in the archive
+                    return null;
+                }
+
+                // Extraction failed — treat as a password error
+                if (password !== undefined) {
+                    vscode.window.showErrorMessage('Password is incorrect. Please try again.');
+                }
+
+                const newPassword = await this.promptForPassword();
+                if (!newPassword) return null;
+                password = newPassword;
+            }
         } catch (error) {
             if (error instanceof Error) {
                 vscode.window.showErrorMessage(`7Z preview error: ${error.message}`);
@@ -573,6 +764,16 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         if (!this.archiveFilePath) {
             vscode.window.showErrorMessage('File path is not available.');
             return null;
+        }
+
+        if (this.isMarkdownFile(fileUri)) {
+            const content = await this.readTextFromTar(fileUri);
+            if (content === null) return null;
+            const imagePaths = this.extractImageRefs(content, fileUri);
+            const imageMap = await this.loadImagesFromTar(imagePaths);
+            const html = await this.renderMarkdownWithImages(content, fileUri,
+                async archivePath => imageMap.get(archivePath) ?? null);
+            return { kind: 'markdown', html };
         }
 
         const isImage = this.isImageFile(fileUri);
@@ -616,7 +817,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                         }
                     }
                 }) as any
-            ).on('error', reject);
+            ).on('finish', () => resolve(null)).on('error', reject);
         });
     }
 
@@ -694,7 +895,8 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
             });
             return true;
         } catch (error: unknown) {
-            if (error instanceof Error && error.message === 'MISSING_PASSWORD') {
+            if (error instanceof Error &&
+                (error.message === 'MISSING_PASSWORD' || error.message === 'BAD_PASSWORD')) {
                 return false;
             }
             throw error;
@@ -726,6 +928,22 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         this.previewPanel.title = `Preview: ${title}`;
         if (result.kind === 'image') {
             this.previewPanel.webview.html = `<html><body style="margin:0;background:#1e1e1e;display:flex;justify-content:center;align-items:center;min-height:100vh;"><img src="data:${result.mimeType};base64,${result.base64}" style="max-width:100%;max-height:100vh;object-fit:contain;"></body></html>`;
+        } else if (result.kind === 'markdown') {
+            this.previewPanel.webview.html = `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;line-height:1.6;padding:20px 40px;max-width:860px;margin:0 auto;color:var(--vscode-foreground,#ccc);background:var(--vscode-editor-background,#1e1e1e)}
+img{max-width:100%;height:auto}
+pre{background:rgba(128,128,128,.12);padding:12px 16px;border-radius:4px;overflow-x:auto}
+code{font-family:"SF Mono",Consolas,"Courier New",monospace;font-size:.9em}
+pre code{font-size:.85em;background:none;padding:0}
+blockquote{border-left:3px solid #555;margin:0;padding-left:16px;color:#999}
+table{border-collapse:collapse;width:100%}
+th,td{border:1px solid #555;padding:6px 12px}
+th{background:rgba(128,128,128,.15)}
+hr{border:none;border-top:1px solid #555}
+a{color:var(--vscode-textLink-foreground,#4fc1ff)}
+h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
+</style></head><body>${result.html}</body></html>`;
         } else {
             this.previewPanel.webview.html = `<html><body><pre>${this.escapeHtml(result.content)}</pre></body></html>`;
         }
@@ -1131,13 +1349,16 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
     private getExtension(filePath: string): string {
         const lowerPath = filePath.toLowerCase();
 
-        const compoundExtensions = [
-            '.tar.gz', '.tar.xz', '.tar.bz2', '.tar.Z', '.tar.lz', '.tar.lzma', '.tar.zst'
-        ];
+        // Map lowercase suffix → canonical extension (preserving uppercase Z in .tar.Z)
+        const compoundExtensions: { [lower: string]: string } = {
+            '.tar.gz': '.tar.gz', '.tar.xz': '.tar.xz', '.tar.bz2': '.tar.bz2',
+            '.tar.z': '.tar.Z',   '.tar.lz': '.tar.lz',  '.tar.lzma': '.tar.lzma',
+            '.tar.zst': '.tar.zst'
+        };
 
-        for (const ext of compoundExtensions) {
-            if (lowerPath.endsWith(ext)) {
-                return ext;
+        for (const [lower, canonical] of Object.entries(compoundExtensions)) {
+            if (lowerPath.endsWith(lower)) {
+                return canonical;
             }
         }
 
@@ -1335,6 +1556,38 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                     .active {
                         display: block;
                     }
+                    .file-info-row.selected {
+                        background: var(--vscode-list-activeSelectionBackground);
+                        color: var(--vscode-list-activeSelectionForeground);
+                        border-radius: 2px;
+                    }
+                    .file-info-row.selected .file-size,
+                    .file-info-row.selected .file-date {
+                        color: var(--vscode-list-activeSelectionForeground);
+                    }
+                    .ad-space {
+                        margin-top: 24px;
+                        padding: 10px 14px;
+                        border: 1px dashed var(--vscode-panel-border);
+                        border-radius: 4px;
+                        display: flex;
+                        align-items: center;
+                        gap: 10px;
+                        opacity: 0.5;
+                    }
+                    .ad-label {
+                        font-size: 9px;
+                        font-weight: bold;
+                        letter-spacing: 0.08em;
+                        padding: 2px 5px;
+                        border: 1px solid currentColor;
+                        border-radius: 2px;
+                        flex-shrink: 0;
+                    }
+                    .ad-message {
+                        font-size: 11px;
+                        font-style: italic;
+                    }
                 </style>
             </head>
             <body>
@@ -1467,31 +1720,83 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                     }
 
 document.addEventListener('DOMContentLoaded', () => {
-    const files = document.querySelectorAll('.file-name');
+    let activePreviewUri = null;
 
-    files.forEach(element => {
-        element.addEventListener('mousedown', function (event) {
-            const row = this.parentElement; // Should be .file-info
-            const fileUri = row && row.getAttribute('data-uri');
-            if (fileUri) {
-                // Request preview the moment mouse button is pressed
-                vscode.postMessage({
-                    command: 'previewFile',
-                    fileUri: fileUri
-                });
-            }
+    function setActiveRow(fileUri) {
+        activePreviewUri = fileUri;
+        document.querySelectorAll('.file-info-row').forEach(row => {
+            row.classList.toggle('selected', row.getAttribute('data-uri') === fileUri);
         });
+        if (fileUri) {
+            const sel = document.querySelector('.file-info-row.selected');
+            if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: 'nearest' });
+        }
+    }
+
+    // Click on a file row to toggle preview
+    document.querySelector('.file-tree').addEventListener('click', (event) => {
+        if (event.target.closest('input')) return; // ignore checkbox clicks
+        const row = event.target.closest('.file-info-row');
+        if (!row) return;
+        const fileUri = row.getAttribute('data-uri');
+        if (!fileUri) return;
+
+        if (activePreviewUri === fileUri) {
+            setActiveRow(null);
+            vscode.postMessage({ command: 'closePreview' });
+        } else {
+            setActiveRow(fileUri);
+            vscode.postMessage({ command: 'previewFile', fileUri: fileUri });
+        }
     });
 
-    // Close preview when mouse button is released anywhere on the screen
-    window.addEventListener('mouseup', function () {
-        vscode.postMessage({
-            command: 'closePreview'
-        });
+    // Click outside file rows to close preview
+    document.addEventListener('click', (event) => {
+        if (!event.target.closest('.file-info-row') && activePreviewUri) {
+            setActiveRow(null);
+            vscode.postMessage({ command: 'closePreview' });
+        }
+    });
+
+    // Arrow key navigation through visible file rows
+    document.addEventListener('keydown', (event) => {
+        if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+
+        const rows = Array.from(document.querySelectorAll('.file-info-row'))
+            .filter(r => {
+                let el = r.parentElement;
+                while (el) {
+                    if (el.classList.contains('nested') && !el.classList.contains('active')) return false;
+                    el = el.parentElement;
+                }
+                return true;
+            });
+        if (rows.length === 0) return;
+        event.preventDefault();
+
+        const currentIdx = activePreviewUri
+            ? rows.findIndex(r => r.getAttribute('data-uri') === activePreviewUri)
+            : -1;
+
+        const nextIdx = event.key === 'ArrowDown'
+            ? Math.min(currentIdx + 1, rows.length - 1)
+            : Math.max(currentIdx - 1, 0);
+
+        if (nextIdx === currentIdx && currentIdx !== -1) return;
+
+        const nextUri = rows[nextIdx].getAttribute('data-uri');
+        if (nextUri) {
+            setActiveRow(nextUri);
+            vscode.postMessage({ command: 'previewFile', fileUri: nextUri });
+        }
     });
 });
 
                 </script>
+                <div class="ad-space">
+                    <span class="ad-label">AD</span>
+                    <span class="ad-message">Advertising space available — contact us to reach VS Code users</span>
+                </div>
             </body>
             </html>`;
     }

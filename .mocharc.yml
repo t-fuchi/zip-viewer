@@ -1,0 +1,5 @@
+require:
+  - tsconfig-paths/register
+  - ts-node/register
+spec: test/suite/**/*.test.ts
+timeout: 15000
