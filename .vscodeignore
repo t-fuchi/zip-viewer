@@ -1,0 +1,122 @@
+# 開発環境
+.vscode/**
+.claude/**
+.vscode-test/**
+
+# ソースコード
+src/**
+**/*.ts
+!out/**/*.d.ts
+
+# ビルド関連
+tsconfig.json
+.eslintrc.json
+**/*.map
+
+# テスト用ファイル
+test/**
+**/*.zip
+**/*.tar
+**/*.tar.gz
+**/*.tar.Z
+**/*.tar.xz
+**/*.tar.bz2
+**/*.7z
+**/*.tgz
+
+# Git関連
+.git/**
+.gitignore
+.gitattributes
+
+# その他
+.editorconfig
+.prettierrc
+*.vsix
+.DS_Store
+Thumbs.db
+.vscodeignore*
+install.txt
+
+# node_modules内の不要なファイル
+node_modules/**/.travis.yml
+node_modules/**/.circleci/**
+node_modules/**/.github/**
+node_modules/**/test/**
+node_modules/**/tests/**
+node_modules/**/example/**
+node_modules/**/examples/**
+node_modules/**/.*
+node_modules/**/*.md
+node_modules/**/*.markdown
+node_modules/**/README*
+node_modules/**/readme*
+node_modules/**/CHANGELOG*
+node_modules/**/LICENSE*
+node_modules/**/HISTORY*
+node_modules/**/LICENCE*
+node_modules/**/license*
+node_modules/**/tsconfig.json
+node_modules/**/.npmignore
+node_modules/**/.eslintrc*
+node_modules/**/Makefile
+node_modules/**/*.gyp
+node_modules/**/*.gypi
+node_modules/**/binding.gyp
+node_modules/**/*.sh
+node_modules/**/*.sig
+node_modules/**/*.c
+node_modules/**/*.cpp
+node_modules/**/*.h
+node_modules/**/*.hpp
+
+# ブラウザ向けビルド（VS Codeでは不要）
+node_modules/**/*-browser.js
+node_modules/**/browser.js
+node_modules/**/dist/**
+node_modules/**/umd/**
+
+# ソースマップ
+node_modules/**/*.map
+
+# TypeScript定義（実行には不要）
+node_modules/**/*.d.ts
+
+# 最小化されたファイル
+node_modules/**/*.min.js
+
+# lzma-native - ソースを除外してprebuildsのみ残す
+node_modules/lzma-native/src/**
+node_modules/lzma-native/deps/**
+node_modules/lzma-native/binding.gyp
+node_modules/lzma-native/liblzma-build.sh
+node_modules/lzma-native/liblzma-config.sh
+
+# 7zip-bin - ビルドスクリプトを除外
+node_modules/7zip-bin/7x.sh
+node_modules/7zip-bin/linux/x64/do-build.sh
+node_modules/7zip-bin/linux/x64/build.sh
+
+# その他の開発用ファイル
+node_modules/**/bower.json
+node_modules/**/component.json
+node_modules/**/yarn.lock
+node_modules/**/package-lock.json
+node_modules/**/.editorconfig
+node_modules/**/.prettierrc*
+node_modules/**/*.d.ts
+
+# binディレクトリ（実行可能ファイルは必要だがスクリプトは不要）
+node_modules/**/bin/**
+!node_modules/7zip-bin/**/*.exe
+!node_modules/7zip-bin/**/7za
+!node_modules/lzma-native/prebuilds/**
+
+# ドキュメント
+node_modules/**/docs/**
+node_modules/**/doc/**
+
+webpack.config.js
+tsconfig.json
+out/**
+dist/extension.js.map
