@@ -43,68 +43,68 @@ function flattenEntries(entries: any[]): any[] {
 
 describe('ZIP archive loading', () => {
     it('loads out.zip and returns valid entries', async () => {
-        await provider.loadZipEntries(path.join(TEST_DIR, 'out.zip'));
-        assertValidEntries(provider.archiveEntries, 'out.zip');
+        const entries = await provider.loadZipEntries(path.join(TEST_DIR, 'out.zip'));
+        assertValidEntries(entries, 'out.zip');
     });
 
     it('contains expected files from out.zip', async () => {
-        await provider.loadZipEntries(path.join(TEST_DIR, 'out.zip'));
-        const all = flattenEntries(provider.archiveEntries);
+        const entries = await provider.loadZipEntries(path.join(TEST_DIR, 'out.zip'));
+        const all = flattenEntries(entries);
         const names = all.map((e: any) => e.name);
         assert.ok(names.includes('extension.js'), 'should contain extension.js');
     });
 
     it('builds correct directory hierarchy for out.zip', async () => {
-        await provider.loadZipEntries(path.join(TEST_DIR, 'out.zip'));
-        const topNames = provider.archiveEntries.map((e: any) => e.name);
+        const entries = await provider.loadZipEntries(path.join(TEST_DIR, 'out.zip'));
+        const topNames = entries.map((e: any) => e.name);
         assert.ok(topNames.includes('out'), 'root should contain out/ directory');
     });
 
     it('loads tmp.zip correctly', async () => {
-        await provider.loadZipEntries(path.join(TEST_DIR, 'tmp.zip'));
-        assertValidEntries(provider.archiveEntries, 'tmp.zip');
+        const entries = await provider.loadZipEntries(path.join(TEST_DIR, 'tmp.zip'));
+        assertValidEntries(entries, 'tmp.zip');
     });
 });
 
 describe('TAR archive loading', () => {
     it('loads out.tar.gz and returns valid entries', async () => {
-        await provider.loadTarEntries(path.join(TEST_DIR, 'out.tar.gz'));
-        assertValidEntries(provider.archiveEntries, 'out.tar.gz');
+        const entries = await provider.loadTarEntries(path.join(TEST_DIR, 'out.tar.gz'));
+        assertValidEntries(entries, 'out.tar.gz');
     });
 
     it('loads out.tgz (alias for tar.gz)', async () => {
-        await provider.loadTarEntries(path.join(TEST_DIR, 'out.tgz'));
-        assertValidEntries(provider.archiveEntries, 'out.tgz');
+        const entries = await provider.loadTarEntries(path.join(TEST_DIR, 'out.tgz'));
+        assertValidEntries(entries, 'out.tgz');
     });
 
     it('loads out.tar.xz', async () => {
-        await provider.loadTarEntries(path.join(TEST_DIR, 'out.tar.xz'));
-        assertValidEntries(provider.archiveEntries, 'out.tar.xz');
+        const entries = await provider.loadTarEntries(path.join(TEST_DIR, 'out.tar.xz'));
+        assertValidEntries(entries, 'out.tar.xz');
     });
 
     it('loads out.tar.bz2', async () => {
-        await provider.loadTarEntries(path.join(TEST_DIR, 'out.tar.bz2'));
-        assertValidEntries(provider.archiveEntries, 'out.tar.bz2');
+        const entries = await provider.loadTarEntries(path.join(TEST_DIR, 'out.tar.bz2'));
+        assertValidEntries(entries, 'out.tar.bz2');
     });
 
     it('loads out.tar.Z (LZW via bundled 7z binary)', async () => {
-        await provider.loadTarEntries(path.join(TEST_DIR, 'out.tar.Z'));
-        assertValidEntries(provider.archiveEntries, 'out.tar.Z');
+        const entries = await provider.loadTarEntries(path.join(TEST_DIR, 'out.tar.Z'));
+        assertValidEntries(entries, 'out.tar.Z');
     });
 
     it('loads plain out.tar', async () => {
-        await provider.loadTarEntries(path.join(TEST_DIR, 'out.tar'));
-        assertValidEntries(provider.archiveEntries, 'out.tar');
+        const entries = await provider.loadTarEntries(path.join(TEST_DIR, 'out.tar'));
+        assertValidEntries(entries, 'out.tar');
     });
 
     it('loads out.tar.zst (Zstandard)', async () => {
-        await provider.loadTarEntries(path.join(TEST_DIR, 'out.tar.zst'));
-        assertValidEntries(provider.archiveEntries, 'out.tar.zst');
+        const entries = await provider.loadTarEntries(path.join(TEST_DIR, 'out.tar.zst'));
+        assertValidEntries(entries, 'out.tar.zst');
     });
 
     it('tar entries contain expected file from out.tar.gz', async () => {
-        await provider.loadTarEntries(path.join(TEST_DIR, 'out.tar.gz'));
-        const all = flattenEntries(provider.archiveEntries);
+        const entries = await provider.loadTarEntries(path.join(TEST_DIR, 'out.tar.gz'));
+        const all = flattenEntries(entries);
         const names = all.map((e: any) => e.name);
         assert.ok(names.includes('extension.js'), 'should contain extension.js');
     });
@@ -112,13 +112,13 @@ describe('TAR archive loading', () => {
 
 describe('7Z archive loading', () => {
     it('loads out.7z and returns valid entries', async () => {
-        await provider.load7zEntries(path.join(TEST_DIR, 'out.7z'));
-        assertValidEntries(provider.archiveEntries, 'out.7z');
+        const entries = await provider.load7zEntries(path.join(TEST_DIR, 'out.7z'));
+        assertValidEntries(entries, 'out.7z');
     });
 
     it('contains expected files from out.7z', async () => {
-        await provider.load7zEntries(path.join(TEST_DIR, 'out.7z'));
-        const all = flattenEntries(provider.archiveEntries);
+        const entries = await provider.load7zEntries(path.join(TEST_DIR, 'out.7z'));
+        const all = flattenEntries(entries);
         const names = all.map((e: any) => e.name);
         assert.ok(names.length > 0, 'should have entries');
     });
@@ -126,8 +126,7 @@ describe('7Z archive loading', () => {
 
 describe('ZIP preview', () => {
     it('previews a text file from out.zip', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'out.zip');
-        const result = await provider.previewZipFile('out/extension.js');
+        const result = await provider.previewZipFile('out/extension.js', path.join(TEST_DIR, 'out.zip'));
         assert.ok(result !== null, 'should return a result');
         assert.strictEqual(result.kind, 'text', 'should be text kind');
         assert.ok(typeof result.content === 'string', 'content should be string');
@@ -135,24 +134,21 @@ describe('ZIP preview', () => {
     });
 
     it('returns null for non-existent file in zip', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'out.zip');
-        const result = await provider.previewZipFile('nonexistent/file.txt');
+        const result = await provider.previewZipFile('nonexistent/file.txt', path.join(TEST_DIR, 'out.zip'));
         assert.strictEqual(result, null);
     });
 });
 
 describe('TAR preview', () => {
     it('previews a text file from out.tar.gz', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'out.tar.gz');
-        const result = await provider.previewTarFile('out/extension.js');
+        const result = await provider.previewTarFile('out/extension.js', path.join(TEST_DIR, 'out.tar.gz'));
         assert.ok(result !== null, 'should return a result');
         assert.strictEqual(result.kind, 'text');
         assert.ok(result.content.length > 0);
     });
 
     it('returns null for non-existent file in tar', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'out.tar.gz');
-        const result = await provider.previewTarFile('no/such/file.txt');
+        const result = await provider.previewTarFile('no/such/file.txt', path.join(TEST_DIR, 'out.tar.gz'));
         assert.strictEqual(result, null);
     });
 });

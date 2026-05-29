@@ -72,7 +72,6 @@ describe('Password flow — logic (mock-based)', () => {
 
     beforeEach(() => {
         provider.savedPasswords = {};
-        provider.archiveFilePath = OPEN_ZIP;
         // Mock checkPassword: only accepts CORRECT_PASSWORD
         provider.checkPassword = async (_file: any, pw: string) => pw === CORRECT_PASSWORD;
     });
@@ -87,53 +86,53 @@ describe('Password flow — logic (mock-based)', () => {
         provider.checkPassword = async () => true;
         let prompted = false;
         provider.promptForPassword = async () => { prompted = true; return ''; };
-        const result = await provider.previewZipFile(OPEN_FILE);
+        const result = await provider.previewZipFile(OPEN_FILE, OPEN_ZIP);
         assert.ok(!prompted, 'should not prompt for unencrypted file');
         assert.ok(result !== null);
     });
 
     it('correct password on first attempt → result is not null', async () => {
         provider.promptForPassword = mockPrompt(CORRECT_PASSWORD);
-        const result = await provider.previewZipFile(OPEN_FILE);
+        const result = await provider.previewZipFile(OPEN_FILE, OPEN_ZIP);
         assert.ok(result !== null);
     });
 
     it('correct password is stored in savedPasswords', async () => {
         provider.promptForPassword = mockPrompt(CORRECT_PASSWORD);
-        await provider.previewZipFile(OPEN_FILE);
+        await provider.previewZipFile(OPEN_FILE, OPEN_ZIP);
         assert.strictEqual(provider.savedPasswords[OPEN_ZIP], CORRECT_PASSWORD);
     });
 
     it('stored password is reused — prompt is not called again', async () => {
         // First call: enter password and save it
         provider.promptForPassword = mockPrompt(CORRECT_PASSWORD);
-        await provider.previewZipFile(OPEN_FILE);
+        await provider.previewZipFile(OPEN_FILE, OPEN_ZIP);
 
         // Second call: should use saved password without prompting
         let promptedAgain = false;
         provider.promptForPassword = async () => { promptedAgain = true; return ''; };
-        const result = await provider.previewZipFile(OPEN_FILE);
+        const result = await provider.previewZipFile(OPEN_FILE, OPEN_ZIP);
         assert.ok(!promptedAgain, 'should not prompt when password is already saved');
         assert.ok(result !== null);
     });
 
     it('cancelling prompt (undefined) returns null', async () => {
         provider.promptForPassword = mockPrompt(undefined);
-        const result = await provider.previewZipFile(OPEN_FILE);
+        const result = await provider.previewZipFile(OPEN_FILE, OPEN_ZIP);
         assert.strictEqual(result, null);
     });
 
     it('empty string from prompt returns null', async () => {
         // promptForPassword that returns '' is treated as cancel
         provider.promptForPassword = mockPrompt('');
-        const result = await provider.previewZipFile(OPEN_FILE);
+        const result = await provider.previewZipFile(OPEN_FILE, OPEN_ZIP);
         assert.strictEqual(result, null);
     });
 
     it('wrong password shows error message', async () => {
         // wrong → cancel so loop exits
         provider.promptForPassword = mockPrompt('wrong', undefined);
-        const errors = await captureErrors(() => provider.previewZipFile(OPEN_FILE));
+        const errors = await captureErrors(() => provider.previewZipFile(OPEN_FILE, OPEN_ZIP));
         assert.ok(errors.length >= 1, 'expected at least one error message');
         assert.ok(errors[0].toLowerCase().includes('incorrect') || errors[0].toLowerCase().includes('password'),
             `unexpected error message: ${errors[0]}`);
@@ -146,7 +145,7 @@ describe('Password flow — logic (mock-based)', () => {
             if (calls === 1) return 'wrong';
             return CORRECT_PASSWORD;
         };
-        const result = await provider.previewZipFile(OPEN_FILE);
+        const result = await provider.previewZipFile(OPEN_FILE, OPEN_ZIP);
         assert.strictEqual(calls, 2, 'should prompt exactly twice: once wrong, once correct');
         assert.ok(result !== null);
     });
@@ -154,7 +153,7 @@ describe('Password flow — logic (mock-based)', () => {
     it('wrong password is not stored in savedPasswords', async () => {
         // wrong → cancel
         provider.promptForPassword = mockPrompt('wrongpass', undefined);
-        await provider.previewZipFile(OPEN_FILE);
+        await provider.previewZipFile(OPEN_FILE, OPEN_ZIP);
         assert.strictEqual(provider.savedPasswords[OPEN_ZIP], undefined,
             'wrong password must not be saved');
     });
@@ -162,7 +161,7 @@ describe('Password flow — logic (mock-based)', () => {
     it('password only saved after correct entry, not after wrong attempt', async () => {
         // wrong first, then correct
         provider.promptForPassword = mockPrompt('wrong', CORRECT_PASSWORD);
-        await provider.previewZipFile(OPEN_FILE);
+        await provider.previewZipFile(OPEN_FILE, OPEN_ZIP);
         assert.strictEqual(provider.savedPasswords[OPEN_ZIP], CORRECT_PASSWORD,
             'only the correct password should be stored');
     });
@@ -179,7 +178,7 @@ describe('Password flow — logic (mock-based)', () => {
         // Pre-populate with a stale password
         provider.savedPasswords[OPEN_ZIP] = 'stale-old-password';
         provider.promptForPassword = mockPrompt(CORRECT_PASSWORD);
-        const result = await provider.previewZipFile(OPEN_FILE);
+        const result = await provider.previewZipFile(OPEN_FILE, OPEN_ZIP);
         assert.ok(result !== null, 'should succeed after re-prompt');
         assert.strictEqual(provider.savedPasswords[OPEN_ZIP], CORRECT_PASSWORD,
             'saved password should be updated to correct one');
@@ -187,7 +186,7 @@ describe('Password flow — logic (mock-based)', () => {
 
     it('multiple wrong attempts before cancel: none stored', async () => {
         provider.promptForPassword = mockPrompt('bad1', 'bad2', 'bad3', undefined);
-        await provider.previewZipFile(OPEN_FILE);
+        await provider.previewZipFile(OPEN_FILE, OPEN_ZIP);
         assert.strictEqual(provider.savedPasswords[OPEN_ZIP], undefined);
     });
 });
@@ -198,7 +197,6 @@ describe('Password handling — ZIP integration (out_pass.zip)', () => {
 
     beforeEach(() => {
         provider.savedPasswords = {};
-        provider.archiveFilePath = PASS_ZIP;
         // Use real checkPassword (not mocked)
         delete provider.checkPassword;
     });
@@ -206,31 +204,31 @@ describe('Password handling — ZIP integration (out_pass.zip)', () => {
     it('encrypted ZIP without password prompts the user', async () => {
         let prompted = false;
         provider.promptForPassword = async () => { prompted = true; return CORRECT_PASSWORD; };
-        const result = await provider.previewZipFile(PASS_FILE);
+        const result = await provider.previewZipFile(PASS_FILE, PASS_ZIP);
         assert.ok(prompted, 'should have prompted for password');
         assert.ok(result !== null);
     });
 
     it('correct password returns a non-null result', async () => {
         provider.promptForPassword = mockPrompt(CORRECT_PASSWORD);
-        const result = await provider.previewZipFile(PASS_FILE);
+        const result = await provider.previewZipFile(PASS_FILE, PASS_ZIP);
         assert.ok(result !== null);
         assert.ok(result.kind === 'text' || result.kind === 'image' || result.kind === 'markdown');
     });
 
     it('correct password is stored after successful decrypt', async () => {
         provider.promptForPassword = mockPrompt(CORRECT_PASSWORD);
-        await provider.previewZipFile(PASS_FILE);
+        await provider.previewZipFile(PASS_FILE, PASS_ZIP);
         assert.strictEqual(provider.savedPasswords[PASS_ZIP], CORRECT_PASSWORD);
     });
 
     it('stored password is reused — no second prompt', async () => {
         provider.promptForPassword = mockPrompt(CORRECT_PASSWORD);
-        await provider.previewZipFile(PASS_FILE); // saves password
+        await provider.previewZipFile(PASS_FILE, PASS_ZIP); // saves password
 
         let secondPrompt = false;
         provider.promptForPassword = async () => { secondPrompt = true; return ''; };
-        const result = await provider.previewZipFile(PASS_FILE);
+        const result = await provider.previewZipFile(PASS_FILE, PASS_ZIP);
         assert.ok(!secondPrompt, 'should reuse stored password');
         assert.ok(result !== null);
     });
@@ -241,20 +239,20 @@ describe('Password handling — ZIP integration (out_pass.zip)', () => {
             calls++;
             return calls === 1 ? 'wrongpassword' : CORRECT_PASSWORD;
         };
-        const errors = await captureErrors(() => provider.previewZipFile(PASS_FILE));
+        const errors = await captureErrors(() => provider.previewZipFile(PASS_FILE, PASS_ZIP));
         assert.ok(errors.length >= 1);
         assert.strictEqual(calls, 2);
     });
 
     it('cancelling prompt returns null', async () => {
         provider.promptForPassword = mockPrompt(undefined);
-        const result = await provider.previewZipFile(PASS_FILE);
+        const result = await provider.previewZipFile(PASS_FILE, PASS_ZIP);
         assert.strictEqual(result, null);
     });
 
     it('wrong password is not stored', async () => {
         provider.promptForPassword = mockPrompt('wrong', undefined);
-        await provider.previewZipFile(PASS_FILE);
+        await provider.previewZipFile(PASS_FILE, PASS_ZIP);
         assert.strictEqual(provider.savedPasswords[PASS_ZIP], undefined);
     });
 });
@@ -265,37 +263,36 @@ describe('Password handling — 7Z integration (out_pass.7z)', () => {
 
     beforeEach(() => {
         provider.savedPasswords = {};
-        provider.archiveFilePath = PASS_7Z;
     });
 
     it('encrypted 7Z without password prompts the user', async () => {
         let prompted = false;
         provider.promptForPassword = async () => { prompted = true; return CORRECT_PASSWORD; };
-        const result = await provider.preview7zFile(PASS_FILE);
+        const result = await provider.preview7zFile(PASS_FILE, PASS_7Z);
         assert.ok(prompted, 'should have prompted for password');
         assert.ok(result !== null);
     });
 
     it('correct password returns a non-null result', async () => {
         provider.promptForPassword = mockPrompt(CORRECT_PASSWORD);
-        const result = await provider.preview7zFile(PASS_FILE);
+        const result = await provider.preview7zFile(PASS_FILE, PASS_7Z);
         assert.ok(result !== null);
         assert.ok(result.kind === 'text' || result.kind === 'image' || result.kind === 'markdown');
     });
 
     it('correct password is stored after successful 7Z decrypt', async () => {
         provider.promptForPassword = mockPrompt(CORRECT_PASSWORD);
-        await provider.preview7zFile(PASS_FILE);
+        await provider.preview7zFile(PASS_FILE, PASS_7Z);
         assert.strictEqual(provider.savedPasswords[PASS_7Z], CORRECT_PASSWORD);
     });
 
     it('stored password is reused — no second prompt', async () => {
         provider.promptForPassword = mockPrompt(CORRECT_PASSWORD);
-        await provider.preview7zFile(PASS_FILE);  // saves password
+        await provider.preview7zFile(PASS_FILE, PASS_7Z);  // saves password
 
         let secondPrompt = false;
         provider.promptForPassword = async () => { secondPrompt = true; return ''; };
-        const result = await provider.preview7zFile(PASS_FILE);
+        const result = await provider.preview7zFile(PASS_FILE, PASS_7Z);
         assert.ok(!secondPrompt, 'should reuse stored password');
         assert.ok(result !== null);
     });
@@ -306,20 +303,20 @@ describe('Password handling — 7Z integration (out_pass.7z)', () => {
             calls++;
             return calls === 1 ? 'wrongpassword' : CORRECT_PASSWORD;
         };
-        const errors = await captureErrors(() => provider.preview7zFile(PASS_FILE));
+        const errors = await captureErrors(() => provider.preview7zFile(PASS_FILE, PASS_7Z));
         assert.ok(errors.length >= 1);
         assert.strictEqual(calls, 2);
     });
 
     it('cancelling 7Z password prompt returns null', async () => {
         provider.promptForPassword = mockPrompt(undefined);
-        const result = await provider.preview7zFile(PASS_FILE);
+        const result = await provider.preview7zFile(PASS_FILE, PASS_7Z);
         assert.strictEqual(result, null);
     });
 
     it('wrong password is not stored', async () => {
         provider.promptForPassword = mockPrompt('wrongpass', undefined);
-        await provider.preview7zFile(PASS_FILE);
+        await provider.preview7zFile(PASS_FILE, PASS_7Z);
         assert.strictEqual(provider.savedPasswords[PASS_7Z], undefined);
     });
 
@@ -328,7 +325,7 @@ describe('Password handling — 7Z integration (out_pass.7z)', () => {
         // 7Z archive has no saved password yet
         let prompted = false;
         provider.promptForPassword = async () => { prompted = true; return CORRECT_PASSWORD; };
-        await provider.preview7zFile(PASS_FILE);
+        await provider.preview7zFile(PASS_FILE, PASS_7Z);
         assert.ok(prompted, '7Z should prompt even though ZIP password was saved');
     });
 });

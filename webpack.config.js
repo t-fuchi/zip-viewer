@@ -11,7 +11,15 @@ module.exports = {
     },
     externals: {
         vscode: 'commonjs vscode',
-        '@mongodb-js/zstd': 'commonjs @mongodb-js/zstd'
+        '@mongodb-js/zstd': 'commonjs @mongodb-js/zstd',
+        'lzma-native': 'commonjs lzma-native',
+        '7zip-bin': 'commonjs 7zip-bin',
+        // Keep these out of the bundle so the cold-start parse is small.
+        // They are require()'d lazily on first use only.
+        'tar': 'commonjs tar',
+        'node-7z': 'commonjs node-7z',
+        'unbzip2-stream': 'commonjs unbzip2-stream',
+        'unzipper': 'commonjs unzipper'
     },
     resolve: {
         extensions: ['.ts', '.js']

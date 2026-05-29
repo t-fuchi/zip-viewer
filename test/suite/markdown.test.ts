@@ -139,43 +139,37 @@ describe('loadFilePreview — raw stream (markdown bypass)', () => {
 
 describe('Markdown preview — ZIP', () => {
     it('previewZipFile returns kind:markdown for readme.md', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'markdown-simple.zip');
-        const result = await provider.previewZipFile('readme.md');
+        const result = await provider.previewZipFile('readme.md', path.join(TEST_DIR, 'markdown-simple.zip'));
         assert.ok(result !== null);
         assert.strictEqual(result.kind, 'markdown');
     });
 
     it('HTML contains rendered heading from readme.md', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'markdown-simple.zip');
-        const result = await provider.previewZipFile('readme.md');
+        const result = await provider.previewZipFile('readme.md', path.join(TEST_DIR, 'markdown-simple.zip'));
         assert.ok(result.html.includes('<h1>'));
         assert.ok(result.html.includes('Hello World'));
     });
 
     it('HTML contains rendered bold text', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'markdown-simple.zip');
-        const result = await provider.previewZipFile('readme.md');
+        const result = await provider.previewZipFile('readme.md', path.join(TEST_DIR, 'markdown-simple.zip'));
         assert.ok(result.html.includes('<strong>'));
     });
 
     it('image references in ZIP are inlined as data URIs', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'markdown-with-images.zip');
-        const result = await provider.previewZipFile('docs/readme.md');
+        const result = await provider.previewZipFile('docs/readme.md', path.join(TEST_DIR, 'markdown-with-images.zip'));
         assert.ok(result !== null);
         assert.strictEqual(result.kind, 'markdown');
         assert.ok(result.html.includes('data:image/png;base64,'), `expected data URI in: ${result.html}`);
     });
 
     it('both images in markdown-with-images.zip are inlined', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'markdown-with-images.zip');
-        const result = await provider.previewZipFile('docs/readme.md');
+        const result = await provider.previewZipFile('docs/readme.md', path.join(TEST_DIR, 'markdown-with-images.zip'));
         const matches = (result.html.match(/data:image\/png;base64,/g) || []).length;
         assert.strictEqual(matches, 2, `expected 2 data URIs, got ${matches}`);
     });
 
     it('returns null for non-existent markdown file', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'markdown-simple.zip');
-        const result = await provider.previewZipFile('no/such.md');
+        const result = await provider.previewZipFile('no/such.md', path.join(TEST_DIR, 'markdown-simple.zip'));
         assert.strictEqual(result, null);
     });
 });
@@ -184,38 +178,41 @@ describe('Markdown preview — ZIP', () => {
 
 describe('Markdown preview — TAR', () => {
     it('previewTarFile returns kind:markdown for readme.md', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'markdown-simple.tar.gz');
-        const result = await provider.previewTarFile('readme.md');
+        const result = await provider.previewTarFile('readme.md', path.join(TEST_DIR, 'markdown-simple.tar.gz'));
         assert.ok(result !== null);
         assert.strictEqual(result.kind, 'markdown');
     });
 
     it('HTML from TAR contains rendered heading', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'markdown-simple.tar.gz');
-        const result = await provider.previewTarFile('readme.md');
+        const result = await provider.previewTarFile('readme.md', path.join(TEST_DIR, 'markdown-simple.tar.gz'));
         assert.ok(result.html.includes('<h1>'));
         assert.ok(result.html.includes('Hello World'));
     });
 
     it('image references in TAR are inlined as data URIs', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'markdown-with-images.tar.gz');
-        const result = await provider.previewTarFile('docs/readme.md');
+        const result = await provider.previewTarFile('docs/readme.md', path.join(TEST_DIR, 'markdown-with-images.tar.gz'));
         assert.ok(result !== null);
         assert.strictEqual(result.kind, 'markdown');
         assert.ok(result.html.includes('data:image/png;base64,'));
     });
 
     it('both images in markdown-with-images.tar.gz are inlined', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'markdown-with-images.tar.gz');
-        const result = await provider.previewTarFile('docs/readme.md');
+        const result = await provider.previewTarFile('docs/readme.md', path.join(TEST_DIR, 'markdown-with-images.tar.gz'));
         const matches = (result.html.match(/data:image\/png;base64,/g) || []).length;
         assert.strictEqual(matches, 2, `expected 2 data URIs, got ${matches}`);
     });
 
     it('returns null for non-existent markdown file in TAR', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'markdown-simple.tar.gz');
-        const result = await provider.previewTarFile('no/such.md');
+        const result = await provider.previewTarFile('no/such.md', path.join(TEST_DIR, 'markdown-simple.tar.gz'));
         assert.strictEqual(result, null);
+    });
+
+    it('previewTarFile returns kind:markdown for README.md in tar.Z (7z decompression path)', async () => {
+        const result = await provider.previewTarFile('README.md', path.join(TEST_DIR, 'out.tar.Z'));
+        assert.ok(result !== null, 'result should not be null');
+        assert.strictEqual(result.kind, 'markdown');
+        assert.ok(result.html.length > 0, 'rendered HTML should not be empty');
+        assert.ok(result.html.includes('<h1>'), 'HTML should contain a heading');
     });
 });
 
@@ -223,22 +220,19 @@ describe('Markdown preview — TAR', () => {
 
 describe('Markdown preview — 7Z', () => {
     it('preview7zFile returns kind:markdown for readme.md', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'markdown-simple.7z');
-        const result = await provider.preview7zFile('readme.md');
+        const result = await provider.preview7zFile('readme.md', path.join(TEST_DIR, 'markdown-simple.7z'));
         assert.ok(result !== null);
         assert.strictEqual(result.kind, 'markdown');
     });
 
     it('HTML from 7Z contains rendered heading', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'markdown-simple.7z');
-        const result = await provider.preview7zFile('readme.md');
+        const result = await provider.preview7zFile('readme.md', path.join(TEST_DIR, 'markdown-simple.7z'));
         assert.ok(result.html.includes('<h1>'));
         assert.ok(result.html.includes('Hello World'));
     });
 
     it('HTML from 7Z contains bold text', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'markdown-simple.7z');
-        const result = await provider.preview7zFile('readme.md');
+        const result = await provider.preview7zFile('readme.md', path.join(TEST_DIR, 'markdown-simple.7z'));
         assert.ok(result.html.includes('<strong>'));
     });
 });

@@ -207,32 +207,27 @@ describe('readZipFileAsText', () => {
 // ── loadImageFromZip ─────────────────────────────────────────────────────────
 
 describe('loadImageFromZip', () => {
-    beforeEach(() => {
-        provider.archiveFilePath = IMAGES_ZIP;
-    });
-
     it('returns null for non-existent image path', async () => {
-        const result = await provider.loadImageFromZip('docs/images/nonexistent.png', '');
+        const result = await provider.loadImageFromZip('docs/images/nonexistent.png', IMAGES_ZIP, '');
         assert.strictEqual(result, null);
     });
 
     it('returns base64 and mimeType for existing PNG', async () => {
-        const result = await provider.loadImageFromZip('docs/images/logo.png', '');
+        const result = await provider.loadImageFromZip('docs/images/logo.png', IMAGES_ZIP, '');
         assert.ok(result !== null, 'should return an image object');
         assert.ok(typeof result.base64 === 'string' && result.base64.length > 0);
         assert.strictEqual(result.mimeType, 'image/png');
     });
 
     it('base64 decodes to non-empty buffer', async () => {
-        const result = await provider.loadImageFromZip('docs/images/icon.png', '');
+        const result = await provider.loadImageFromZip('docs/images/icon.png', IMAGES_ZIP, '');
         assert.ok(result !== null);
         const buf = Buffer.from(result.base64, 'base64');
         assert.ok(buf.length > 0);
     });
 
     it('returns null when archiveFilePath is not set', async () => {
-        provider.archiveFilePath = undefined;
-        const result = await provider.loadImageFromZip('docs/images/logo.png', '');
+        const result = await provider.loadImageFromZip('docs/images/logo.png', undefined, '');
         assert.strictEqual(result, null);
     });
 });
@@ -240,23 +235,19 @@ describe('loadImageFromZip', () => {
 // ── readTextFromTar ──────────────────────────────────────────────────────────
 
 describe('readTextFromTar', () => {
-    beforeEach(() => {
-        provider.archiveFilePath = OUT_TAR_GZ;
-    });
-
     it('reads text content from a known entry', async () => {
-        const text = await provider.readTextFromTar('out/extension.js');
+        const text = await provider.readTextFromTar('out/extension.js', OUT_TAR_GZ);
         assert.ok(text !== null, 'should return text');
         assert.ok(typeof text === 'string' && text.length > 0);
     });
 
     it('returns null for a non-existent entry', async () => {
-        const text = await provider.readTextFromTar('no/such/file.txt');
+        const text = await provider.readTextFromTar('no/such/file.txt', OUT_TAR_GZ);
         assert.strictEqual(text, null);
     });
 
     it('returned content is valid UTF-8 text', async () => {
-        const text = await provider.readTextFromTar('out/extension.js');
+        const text = await provider.readTextFromTar('out/extension.js', OUT_TAR_GZ);
         assert.ok(text !== null);
         assert.doesNotThrow(() => Buffer.from(text!, 'utf8'));
     });
@@ -265,17 +256,13 @@ describe('readTextFromTar', () => {
 // ── loadImagesFromTar ────────────────────────────────────────────────────────
 
 describe('loadImagesFromTar', () => {
-    beforeEach(() => {
-        provider.archiveFilePath = IMAGES_TAR_GZ;
-    });
-
     it('returns empty map for empty input', async () => {
-        const result = await provider.loadImagesFromTar([]);
+        const result = await provider.loadImagesFromTar([], IMAGES_TAR_GZ);
         assert.strictEqual(result.size, 0);
     });
 
     it('returns base64 data for an existing image entry', async () => {
-        const result = await provider.loadImagesFromTar(['docs/images/logo.png']);
+        const result = await provider.loadImagesFromTar(['docs/images/logo.png'], IMAGES_TAR_GZ);
         assert.strictEqual(result.size, 1);
         const img = result.get('docs/images/logo.png');
         assert.ok(img, 'should have the image entry');
@@ -285,7 +272,7 @@ describe('loadImagesFromTar', () => {
 
     it('loads multiple images in one pass', async () => {
         const paths = ['docs/images/logo.png', 'docs/images/icon.png'];
-        const result = await provider.loadImagesFromTar(paths);
+        const result = await provider.loadImagesFromTar(paths, IMAGES_TAR_GZ);
         assert.strictEqual(result.size, 2);
         assert.ok(result.has('docs/images/logo.png'));
         assert.ok(result.has('docs/images/icon.png'));
@@ -295,7 +282,7 @@ describe('loadImagesFromTar', () => {
         const result = await provider.loadImagesFromTar([
             'docs/images/logo.png',
             'does/not/exist.png'
-        ]);
+        ], IMAGES_TAR_GZ);
         assert.strictEqual(result.size, 1);
         assert.ok(result.has('docs/images/logo.png'));
         assert.ok(!result.has('does/not/exist.png'));

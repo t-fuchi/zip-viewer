@@ -117,6 +117,10 @@ node_modules/**/docs/**
 node_modules/**/doc/**
 
 webpack.config.js
+webpack
 tsconfig.json
+tsconfig.test.json
+.mocharc.yml
+make_icon.py
 out/**
 dist/extension.js.map

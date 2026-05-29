@@ -51,7 +51,6 @@ afterEach(() => {
 
 describe('extractZipFile', () => {
     beforeEach(() => {
-        provider.archiveFilePath = OUT_ZIP;
         provider.savedPasswords = {};
     });
 
@@ -60,7 +59,7 @@ describe('extractZipFile', () => {
         const savePath = path.join(tmpDir, 'extension.js');
         fakeVscode.window.showSaveDialog = async () => ({ fsPath: savePath });
 
-        await provider.extractZipFile(TEST_FILE);
+        await provider.extractZipFile(TEST_FILE, OUT_ZIP);
 
         assert.ok(fs.existsSync(savePath), 'extracted file should exist');
         assert.ok(fs.readFileSync(savePath).length > 0, 'extracted file should be non-empty');
@@ -71,25 +70,25 @@ describe('extractZipFile', () => {
         const savePath = path.join(tmpDir, 'extension.js');
         fakeVscode.window.showSaveDialog = async () => ({ fsPath: savePath });
 
-        await provider.extractZipFile(TEST_FILE);
+        await provider.extractZipFile(TEST_FILE, OUT_ZIP);
         const extracted = fs.readFileSync(savePath);
 
         // Cross-check with ZIP preview
-        const preview = await provider.previewZipFile(TEST_FILE);
+        const preview = await provider.previewZipFile(TEST_FILE, OUT_ZIP);
         assert.ok(extracted.toString('utf8').startsWith(preview.content.split('\n')[0]),
             'extracted content should match preview');
     });
 
     it('does nothing when the save dialog is cancelled', async () => {
         fakeVscode.window.showSaveDialog = async () => undefined;
-        await provider.extractZipFile(TEST_FILE); // should not throw
+        await provider.extractZipFile(TEST_FILE, OUT_ZIP); // should not throw
     });
 
     it('returns early (no dialog) when file does not exist in archive', async () => {
         let dialogCalled = false;
         fakeVscode.window.showSaveDialog = async () => { dialogCalled = true; return undefined; };
 
-        await provider.extractZipFile('no/such/file.txt');
+        await provider.extractZipFile('no/such/file.txt', OUT_ZIP);
 
         assert.ok(!dialogCalled, 'save dialog should not be shown for missing file');
     });
@@ -101,16 +100,12 @@ describe('extractZipFile', () => {
 // into path.dirname(saveUri.fsPath).
 
 describe('extractTarFile', () => {
-    beforeEach(() => {
-        provider.archiveFilePath = OUT_TAR_GZ;
-    });
-
     it('extracts a file from tar.gz (strip:1 removes top-level folder)', async () => {
         const tmpDir = makeTmpDir();
         // The user saves to "extension.js" in tmpDir; strip:1 puts it there.
         fakeVscode.window.showSaveDialog = async () => ({ fsPath: path.join(tmpDir, 'extension.js') });
 
-        await provider.extractTarFile(TEST_FILE);
+        await provider.extractTarFile(TEST_FILE, OUT_TAR_GZ);
 
         const extracted = path.join(tmpDir, 'extension.js');
         assert.ok(fs.existsSync(extracted), 'stripped file should exist in the save directory');
@@ -119,23 +114,19 @@ describe('extractTarFile', () => {
 
     it('does nothing when the save dialog is cancelled', async () => {
         fakeVscode.window.showSaveDialog = async () => undefined;
-        await provider.extractTarFile(TEST_FILE);
+        await provider.extractTarFile(TEST_FILE, OUT_TAR_GZ);
     });
 });
 
 // ─── extract7zFile ─────────────────────────────────────────────────────────────
 
 describe('extract7zFile', () => {
-    beforeEach(() => {
-        provider.archiveFilePath = OUT_7Z;
-    });
-
     it('extracts a file from 7z to the save path', async () => {
         const tmpDir = makeTmpDir();
         const savePath = path.join(tmpDir, 'extension.js');
         fakeVscode.window.showSaveDialog = async () => ({ fsPath: savePath });
 
-        await provider.extract7zFile(TEST_FILE);
+        await provider.extract7zFile(TEST_FILE, OUT_7Z);
 
         assert.ok(fs.existsSync(savePath), 'extracted file should exist');
         assert.ok(fs.readFileSync(savePath).length > 0);
@@ -143,7 +134,7 @@ describe('extract7zFile', () => {
 
     it('does nothing when the save dialog is cancelled', async () => {
         fakeVscode.window.showSaveDialog = async () => undefined;
-        await provider.extract7zFile(TEST_FILE);
+        await provider.extract7zFile(TEST_FILE, OUT_7Z);
     });
 });
 
@@ -153,7 +144,6 @@ describe('extract7zFile', () => {
 
 describe('extractZipFolder', () => {
     beforeEach(() => {
-        provider.archiveFilePath = OUT_ZIP;
         provider.savedPasswords = {};
     });
 
@@ -161,7 +151,7 @@ describe('extractZipFolder', () => {
         const tmpDir = makeTmpDir();
         fakeVscode.window.showOpenDialog = async () => [{ fsPath: tmpDir }];
 
-        await provider.extractZipFolder(TEST_FOLDER);
+        await provider.extractZipFolder(TEST_FOLDER, OUT_ZIP);
 
         const folderPath = path.join(tmpDir, 'out');
         assert.ok(fs.existsSync(folderPath), 'top-level "out" folder should be created');
@@ -170,12 +160,12 @@ describe('extractZipFolder', () => {
 
     it('does nothing when the open dialog is cancelled', async () => {
         fakeVscode.window.showOpenDialog = async () => undefined;
-        await provider.extractZipFolder(TEST_FOLDER);
+        await provider.extractZipFolder(TEST_FOLDER, OUT_ZIP);
     });
 
     it('does nothing when the open dialog returns an empty array', async () => {
         fakeVscode.window.showOpenDialog = async () => [];
-        await provider.extractZipFolder(TEST_FOLDER);
+        await provider.extractZipFolder(TEST_FOLDER, OUT_ZIP);
     });
 });
 
@@ -185,15 +175,11 @@ describe('extractZipFolder', () => {
 // directly inside the chosen destination.
 
 describe('extractTarFolder', () => {
-    beforeEach(() => {
-        provider.archiveFilePath = OUT_TAR_GZ;
-    });
-
     it('extracts folder contents from tar.gz with strip:1', async () => {
         const tmpDir = makeTmpDir();
         fakeVscode.window.showOpenDialog = async () => [{ fsPath: tmpDir }];
 
-        await provider.extractTarFolder(TEST_FOLDER);
+        await provider.extractTarFolder(TEST_FOLDER, OUT_TAR_GZ);
 
         assert.ok(fs.existsSync(path.join(tmpDir, 'extension.js')),
             'strip:1 should place extension.js directly in destination, not inside "out/"');
@@ -201,7 +187,7 @@ describe('extractTarFolder', () => {
 
     it('does nothing when the open dialog is cancelled', async () => {
         fakeVscode.window.showOpenDialog = async () => undefined;
-        await provider.extractTarFolder(TEST_FOLDER);
+        await provider.extractTarFolder(TEST_FOLDER, OUT_TAR_GZ);
     });
 });
 
@@ -210,15 +196,11 @@ describe('extractTarFolder', () => {
 // Uses 7z extractFull with "folderUri/*" wildcard; full paths are preserved.
 
 describe('extract7zFolder', () => {
-    beforeEach(() => {
-        provider.archiveFilePath = OUT_7Z;
-    });
-
     it('extracts folder from 7z preserving full path', async () => {
         const tmpDir = makeTmpDir();
         fakeVscode.window.showOpenDialog = async () => [{ fsPath: tmpDir }];
 
-        await provider.extract7zFolder(TEST_FOLDER);
+        await provider.extract7zFolder(TEST_FOLDER, OUT_7Z);
 
         assert.ok(fs.existsSync(path.join(tmpDir, 'out', 'extension.js')),
             'full path should be preserved under destination');
@@ -226,7 +208,7 @@ describe('extract7zFolder', () => {
 
     it('does nothing when the open dialog is cancelled', async () => {
         fakeVscode.window.showOpenDialog = async () => undefined;
-        await provider.extract7zFolder(TEST_FOLDER);
+        await provider.extract7zFolder(TEST_FOLDER, OUT_7Z);
     });
 });
 
@@ -238,25 +220,24 @@ describe('extractSelectedZip', () => {
     const progress = { report: () => {} };
 
     beforeEach(() => {
-        provider.archiveFilePath = OUT_ZIP;
         provider.savedPasswords = {};
     });
 
     it('extracts a single selected file', async () => {
         const tmpDir = makeTmpDir();
-        await provider.extractSelectedZip([TEST_FILE], tmpDir, progress);
+        await provider.extractSelectedZip([TEST_FILE], tmpDir, progress, OUT_ZIP);
         assert.ok(fs.existsSync(path.join(tmpDir, TEST_FILE)));
     });
 
     it('extracted file is non-empty', async () => {
         const tmpDir = makeTmpDir();
-        await provider.extractSelectedZip([TEST_FILE], tmpDir, progress);
+        await provider.extractSelectedZip([TEST_FILE], tmpDir, progress, OUT_ZIP);
         assert.ok(fs.readFileSync(path.join(tmpDir, TEST_FILE)).length > 0);
     });
 
     it('extracts all files under a selected folder', async () => {
         const tmpDir = makeTmpDir();
-        await provider.extractSelectedZip([TEST_FOLDER], tmpDir, progress);
+        await provider.extractSelectedZip([TEST_FOLDER], tmpDir, progress, OUT_ZIP);
         // Files under "out/" should exist at destination/out/<filename>
         assert.ok(fs.existsSync(path.join(tmpDir, TEST_FILE)));
         assert.ok(fs.existsSync(path.join(tmpDir, 'out', 'extension.js.map')));
@@ -267,7 +248,8 @@ describe('extractSelectedZip', () => {
         await provider.extractSelectedZip(
             ['out/extension.js', 'out/extension.js.map'],
             tmpDir,
-            progress
+            progress,
+            OUT_ZIP
         );
         assert.ok(fs.existsSync(path.join(tmpDir, 'out', 'extension.js')));
         assert.ok(fs.existsSync(path.join(tmpDir, 'out', 'extension.js.map')));
@@ -281,19 +263,15 @@ describe('extractSelectedZip', () => {
 describe('extractSelectedTar', () => {
     const progress = { report: () => {} };
 
-    beforeEach(() => {
-        provider.archiveFilePath = OUT_TAR_GZ;
-    });
-
     it('extracts a selected file from tar.gz with full path', async () => {
         const tmpDir = makeTmpDir();
-        await provider.extractSelectedTar([TEST_FILE], tmpDir, progress);
+        await provider.extractSelectedTar([TEST_FILE], tmpDir, progress, OUT_TAR_GZ);
         assert.ok(fs.existsSync(path.join(tmpDir, TEST_FILE)));
     });
 
     it('extracts all files under a selected folder', async () => {
         const tmpDir = makeTmpDir();
-        await provider.extractSelectedTar([TEST_FOLDER], tmpDir, progress);
+        await provider.extractSelectedTar([TEST_FOLDER], tmpDir, progress, OUT_TAR_GZ);
         assert.ok(fs.existsSync(path.join(tmpDir, TEST_FILE)));
     });
 
@@ -302,7 +280,8 @@ describe('extractSelectedTar', () => {
         await provider.extractSelectedTar(
             ['out/extension.js', 'out/extension.js.map'],
             tmpDir,
-            progress
+            progress,
+            OUT_TAR_GZ
         );
         assert.ok(fs.existsSync(path.join(tmpDir, 'out', 'extension.js')));
         assert.ok(fs.existsSync(path.join(tmpDir, 'out', 'extension.js.map')));
@@ -314,13 +293,9 @@ describe('extractSelectedTar', () => {
 describe('extractSelected7z', () => {
     const progress = { report: () => {} };
 
-    beforeEach(() => {
-        provider.archiveFilePath = OUT_7Z;
-    });
-
     it('extracts a selected file from 7z with full path', async () => {
         const tmpDir = makeTmpDir();
-        await provider.extractSelected7z([TEST_FILE], tmpDir, progress);
+        await provider.extractSelected7z([TEST_FILE], tmpDir, progress, OUT_7Z);
         assert.ok(fs.existsSync(path.join(tmpDir, TEST_FILE)));
     });
 
@@ -329,7 +304,8 @@ describe('extractSelected7z', () => {
         await provider.extractSelected7z(
             ['out/extension.js', 'out/extension.js.map'],
             tmpDir,
-            progress
+            progress,
+            OUT_7Z
         );
         assert.ok(fs.existsSync(path.join(tmpDir, 'out', 'extension.js')));
         assert.ok(fs.existsSync(path.join(tmpDir, 'out', 'extension.js.map')));

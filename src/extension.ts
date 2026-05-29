@@ -1,18 +1,33 @@
 import * as vscode from 'vscode';
-import * as unzipper from 'unzipper';
-import * as tar from 'tar';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as lzma from 'lzma-native';
+import * as crypto from 'crypto';
 import * as zlib from 'zlib';
 import { pipeline, Readable, Transform } from 'stream';
 import { promisify } from 'util';
 import { spawn } from 'child_process';
-import bz2 = require('unbzip2-stream');
-import * as Seven from 'node-7z';
-import * as zstd from '@mongodb-js/zstd';
-import MarkdownIt = require('markdown-it');
-const sevenBin = require('7zip-bin');
+import type * as tarType from 'tar';
+import type * as unzipperType from 'unzipper';
+import type * as SevenType from 'node-7z';
+
+// Heavy/native modules — lazy-loaded on first use to keep activation fast.
+let _sevenBinPath: string | null = null;
+let _tar: typeof tarType | null = null;
+let _unzipper: typeof unzipperType | null = null;
+let _Seven: typeof SevenType | null = null;
+let _lzma: any = null;
+let _zstd: any = null;
+let _bz2: any = null;
+let _MarkdownIt: any = null;
+let _sevenBin: any = null;
+function getTar() { return _tar ?? (_tar = require('tar')); }
+function getUnzipper() { return _unzipper ?? (_unzipper = require('unzipper')); }
+function getSeven() { return _Seven ?? (_Seven = require('node-7z')); }
+function getLzma() { return _lzma ?? (_lzma = require('lzma-native')); }
+function getZstd() { return _zstd ?? (_zstd = require('@mongodb-js/zstd')); }
+function getBz2() { return _bz2 ?? (_bz2 = require('unbzip2-stream')); }
+function getMarkdownIt() { return _MarkdownIt ?? (_MarkdownIt = require('markdown-it')); }
+function getSevenBin() { return _sevenBin ?? (_sevenBin = require('7zip-bin')); }
 
 const pipelineAsync = promisify(pipeline);
 
@@ -30,28 +45,35 @@ interface ArchiveEntry {
     date?: Date;
 }
 
+interface DocumentState {
+    archiveFilePath: string;
+    archiveEntries: ArchiveEntry[];
+    previewPanel: vscode.WebviewPanel | undefined;
+    previewRequestId: number;
+    zipDirectory?: any;
+}
+
 export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.window.registerCustomEditorProvider(
             'zipViewer.viewer',
             new ArchiveFileEditorProvider(context),
             {
-                supportsMultipleEditorsPerDocument: false
+                supportsMultipleEditorsPerDocument: false,
+                webviewOptions: { retainContextWhenHidden: true }
             }
         )
     );
+
+    // Eagerly load unzipper here so the first ZIP open is instant.
+    // activate() runs at onStartupFinished, after VS Code is already responsive,
+    // so this ~150ms one-time cost is invisible to the user.
+    try { getUnzipper(); } catch { /* ignore */ }
 }
 
 class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
-    private archiveFilePath: string | undefined;
-    private previewPanel: vscode.WebviewPanel | undefined;
-    private archiveEntries: ArchiveEntry[] = [];
-    private savedPasswords: { [archiveFilePath: string]: string } = {};
-    private previewStartTime: number = 0;
-    private minPreviewDuration: number = 300; // 最小300ms表示
-
-    /** 直近のプレビューリクエストID — 連続リクエスト時に古い結果を破棄するため */
-    private previewRequestId: number = 0;
+    private readonly documentStates = new Map<string, DocumentState>();
+    private readonly savedPasswords: { [archiveFilePath: string]: string } = {};
 
     constructor(private readonly context: vscode.ExtensionContext) { }
 
@@ -60,37 +82,24 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         openContext: vscode.CustomDocumentOpenContext,
         token: vscode.CancellationToken
     ): Promise<vscode.CustomDocument> {
-        this.archiveFilePath = uri.fsPath;
-        const extension = this.getExtension(this.archiveFilePath);
+        const state: DocumentState = {
+            archiveFilePath: uri.fsPath,
+            archiveEntries: [],
+            previewPanel: undefined,
+            previewRequestId: 0
+        };
+        this.documentStates.set(uri.toString(), state);
 
-        const stats = fs.statSync(this.archiveFilePath);
-        const fileSizeMB = stats.size / (1024 * 1024);
-
-        if (fileSizeMB > 10) {
-            await vscode.window.withProgress({
-                location: vscode.ProgressLocation.Notification,
-                title: `Loading archive... (${fileSizeMB.toFixed(1)} MB)`,
-                cancellable: true
-            }, async (progress, cancellationToken) => {
-                if (extension === '.zip') {
-                    await this.loadZipEntries(this.archiveFilePath!, progress, cancellationToken);
-                } else if (extension === '.7z') {
-                    await this.load7zEntries(this.archiveFilePath!, progress, cancellationToken);
-                } else if (this.isTarFormat(extension)) {
-                    await this.loadTarEntries(this.archiveFilePath!, progress, cancellationToken);
+        return {
+            uri,
+            dispose: () => {
+                const s = this.documentStates.get(uri.toString());
+                if (s?.previewPanel) {
+                    s.previewPanel.dispose();
                 }
-            });
-        } else {
-            if (extension === '.zip') {
-                await this.loadZipEntries(this.archiveFilePath);
-            } else if (extension === '.7z') {
-                await this.load7zEntries(this.archiveFilePath);
-            } else if (this.isTarFormat(extension)) {
-                await this.loadTarEntries(this.archiveFilePath);
+                this.documentStates.delete(uri.toString());
             }
-        }
-
-        return { uri, dispose: () => this.dispose() };
+        };
     }
 
     async resolveCustomEditor(
@@ -98,40 +107,99 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         webviewPanel: vscode.WebviewPanel,
         token: vscode.CancellationToken
     ): Promise<void> {
+        let state = this.documentStates.get(document.uri.toString());
+        if (!state) {
+            state = {
+                archiveFilePath: document.uri.fsPath,
+                archiveEntries: [],
+                previewPanel: undefined,
+                previewRequestId: 0
+            };
+            this.documentStates.set(document.uri.toString(), state);
+        }
+
         webviewPanel.webview.options = { enableScripts: true };
-        webviewPanel.webview.html = this.getWebviewContent(this.archiveEntries);
+        // Show loading UI immediately so the panel appears without delay
+        webviewPanel.webview.html = this.getWebviewContent([], webviewPanel.webview, true);
 
         webviewPanel.webview.onDidReceiveMessage(
             async (message) => {
                 if (message.command === 'previewFile') {
                     const fileUri = message.fileUri;
-                    const requestId = ++this.previewRequestId;
+                    const requestId = ++state!.previewRequestId;
 
-                    const result = await this.previewFile(fileUri);
+                    let result: PreviewResult | null = null;
+                    try {
+                        result = await this.previewFile(fileUri, state!.archiveFilePath, state!);
+                    } catch (err) {
+                        vscode.window.showErrorMessage(`Preview error: ${err instanceof Error ? err.message : String(err)}`);
+                        return;
+                    }
 
-                    // より新しいリクエストが来ていた場合は破棄
-                    if (requestId !== this.previewRequestId) {
+                    if (requestId !== state!.previewRequestId) {
                         return;
                     }
 
                     if (result) {
-                        this.showPreviewPanel(fileUri, result);
+                        this.showPreviewPanel(fileUri, result, state!);
                     }
                 } else if (message.command === 'closePreview') {
-                    this.previewRequestId++; // 読み込み中のプレビューをキャンセル
-                    this.closePreviewPanel();
+                    state!.previewRequestId++;
+                    this.closePreviewPanel(state!);
                 } else if (message.command === 'extractFile') {
-                    await this.extractFile(message.fileUri);
+                    await this.extractFile(message.fileUri, state!.archiveFilePath);
 
                 } else if (message.command === 'extractFolder') {
-                    await this.extractFolder(message.folderUri);
+                    await this.extractFolder(message.folderUri, state!.archiveFilePath);
                 } else if (message.command === 'extractSelected') {
-                    await this.extractSelected(message.selectedPaths);
+                    await this.extractSelected(message.selectedPaths, state!.archiveFilePath);
                 }
             },
             undefined,
             this.context.subscriptions
         );
+
+        // Fire-and-forget: do NOT await here — resolveCustomEditor must return
+        // quickly so VS Code renders the webview immediately with the loading state.
+        void this.loadAndPostTree(state!, webviewPanel);
+    }
+
+    private async loadAndPostTree(state: DocumentState, webviewPanel: vscode.WebviewPanel): Promise<void> {
+        const archiveFilePath = state.archiveFilePath;
+        const extension = this.getExtension(archiveFilePath);
+        const stats = fs.statSync(archiveFilePath);
+        const fileSizeMB = stats.size / (1024 * 1024);
+
+        const doLoad = async (
+            progress?: vscode.Progress<{ message?: string; increment?: number }>,
+            cancellationToken?: vscode.CancellationToken
+        ): Promise<ArchiveEntry[]> => {
+            if (extension === '.zip') {
+                return this.loadZipEntries(archiveFilePath, state, progress, cancellationToken);
+            } else if (extension === '.7z') {
+                return this.load7zEntries(archiveFilePath, progress, cancellationToken);
+            } else if (this.isTarFormat(extension)) {
+                return this.loadTarEntries(archiveFilePath, progress, cancellationToken);
+            }
+            return [];
+        };
+
+        let entries: ArchiveEntry[];
+        if (fileSizeMB > 10) {
+            entries = await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: `Loading archive... (${fileSizeMB.toFixed(1)} MB)`,
+                cancellable: true
+            }, (progress, cancellationToken) => doLoad(progress, cancellationToken));
+        } else {
+            entries = await doLoad();
+        }
+
+        state.archiveEntries = entries;
+        webviewPanel.webview.postMessage({
+            command: 'updateTree',
+            html: this.renderTreeHtml(entries)
+        });
     }
 
     private isTarFormat(extension: string): boolean {
@@ -154,16 +222,14 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
             case '.tar.bz2':
             case '.tbz2':
             case '.tz2':
-                return fileStream.pipe(bz2());
+                return fileStream.pipe(getBz2()());
 
             case '.tar.xz':
-                return fileStream.pipe(lzma.createDecompressor());
+                return fileStream.pipe(getLzma().createDecompressor());
 
             case '.tar.Z':
             case '.taz':
             case '.taZ': {
-                // zlib.createUnzip() only handles gzip/deflate, not LZW (.Z).
-                // Use the bundled 7z binary to decompress to stdout instead.
                 fileStream.destroy();
                 const child = spawn(this.get7zPath(), ['e', '-so', filePath]);
                 return child.stdout as unknown as Readable;
@@ -171,10 +237,10 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
             case '.tar.lz':
             case '.tlz':
-                return fileStream.pipe(lzma.createDecompressor());
+                return fileStream.pipe(getLzma().createDecompressor());
 
             case '.tar.lzma':
-                return fileStream.pipe(lzma.createDecompressor());
+                return fileStream.pipe(getLzma().createDecompressor());
 
             case '.tar.zst': {
                 const chunks: Buffer[] = [];
@@ -184,7 +250,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                         cb();
                     },
                     flush(cb: (err?: Error | null) => void) {
-                        zstd.decompress(Buffer.concat(chunks))
+                        getZstd().decompress(Buffer.concat(chunks))
                             .then(decompressed => { this.push(decompressed); cb(); })
                             .catch(cb);
                     }
@@ -200,28 +266,30 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
     private async loadZipEntries(
         zipFilePath: string,
+        state?: DocumentState,
         progress?: vscode.Progress<{ message?: string; increment?: number }>,
         cancellationToken?: vscode.CancellationToken
-    ) {
+    ): Promise<ArchiveEntry[]> {
         try {
             progress?.report({ message: 'Reading ZIP file directory...' });
 
-            const directory = await unzipper.Open.file(zipFilePath);
+            const directory = await getUnzipper().Open.file(zipFilePath);
+            if (state) state.zipDirectory = directory;
 
             if (cancellationToken?.isCancellationRequested) {
-                this.archiveEntries = [];
-                return;
+                return [];
             }
 
             progress?.report({ message: 'Building file tree...', increment: 50 });
-            this.archiveEntries = this.buildTree(directory.files);
+            const entries = this.buildTree(directory.files);
 
             progress?.report({ message: 'Complete', increment: 50 });
+            return entries;
         } catch (error) {
             if (error instanceof Error) {
                 vscode.window.showErrorMessage(`Error reading ZIP file: ${error.message}`);
             }
-            this.archiveEntries = [];
+            return [];
         }
     }
 
@@ -229,17 +297,17 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         sevenZipFilePath: string,
         progress?: vscode.Progress<{ message?: string; increment?: number }>,
         cancellationToken?: vscode.CancellationToken
-    ) {
+    ): Promise<ArchiveEntry[]> {
         try {
             progress?.report({ message: 'Reading 7Z file...' });
 
             const entries: ArchiveEntry[] = [];
-            const sevenZip = Seven.list(sevenZipFilePath, { $bin: this.get7zPath() });
+            const sevenZip = getSeven().list(sevenZipFilePath, { $bin: this.get7zPath() });
 
             await new Promise<void>((resolve, reject) => {
                 sevenZip.on('data', (data: any) => {
                     if (cancellationToken?.isCancellationRequested) {
-                        sevenZip.destroy();
+                        (sevenZip as any).destroy();
                         reject(new Error('Cancelled'));
                         return;
                     }
@@ -261,22 +329,32 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
             });
 
             if (cancellationToken?.isCancellationRequested) {
-                this.archiveEntries = [];
-                return;
+                return [];
             }
 
-            this.archiveEntries = entries;
             progress?.report({ message: 'Complete' });
+            return entries;
         } catch (error) {
             if (error instanceof Error && error.message !== 'Cancelled') {
                 vscode.window.showErrorMessage(`Error reading 7Z file: ${error.message}`);
             }
-            this.archiveEntries = [];
+            return [];
         }
+    }
+
+    private isSystemFile(pathParts: string[]): boolean {
+        return pathParts.some(part =>
+            part === '.DS_Store' ||
+            part === '__MACOSX' ||
+            part === 'Thumbs.db' ||
+            part === 'desktop.ini' ||
+            part.startsWith('._')
+        );
     }
 
     private process7zEntry(entries: ArchiveEntry[], filePath: string, entry: ArchiveEntry) {
         const parts = filePath.split(/[/\\]/);
+        if (this.isSystemFile(parts)) return;
         let currentLevel = entries;
 
         parts.forEach((part, index) => {
@@ -285,10 +363,8 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
             let existing = currentLevel.find(e => e.name === part);
             if (!existing) {
                 if (index === parts.length - 1) {
-                    // 最後の部分 = 実際のファイル/フォルダ
                     currentLevel.push(entry);
                 } else {
-                    // 中間ディレクトリ
                     existing = {
                         name: part,
                         size: 0,
@@ -309,14 +385,11 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
     }
 
     private get7zPath(): string {
-        // 7zip-bin package binary
-        const binaryPath = sevenBin.path7za;
-
-        // Check and set execution permission (first time only)
+        if (_sevenBinPath) return _sevenBinPath;
+        const binaryPath = getSevenBin().path7za;
         try {
             fs.accessSync(binaryPath, fs.constants.X_OK);
         } catch (error) {
-            // Grant execution permission if not present
             try {
                 fs.chmodSync(binaryPath, 0o755);
                 vscode.window.showInformationMessage('Set execution permission for 7-Zip binary');
@@ -324,7 +397,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 vscode.window.showErrorMessage('Failed to set execution permission for 7-Zip binary. Please run manually: chmod +x ' + binaryPath);
             }
         }
-
+        _sevenBinPath = binaryPath;
         return binaryPath;
     }
 
@@ -332,7 +405,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         tarFilePath: string,
         progress?: vscode.Progress<{ message?: string; increment?: number }>,
         cancellationToken?: vscode.CancellationToken
-    ) {
+    ): Promise<ArchiveEntry[]> {
         const entries: ArchiveEntry[] = [];
         const extension = this.getExtension(tarFilePath);
 
@@ -371,7 +444,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
             await pipelineAsync(
                 decompressedStream,
                 progressTrackingStream,
-                tar.t({
+                getTar().t({
                     onentry: entry => {
                         if (!cancellationToken?.isCancellationRequested) {
                             this.processTarEntry(entries, entry);
@@ -381,27 +454,28 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
             );
 
             if (cancellationToken?.isCancellationRequested) {
-                this.archiveEntries = [];
-                return;
+                return [];
             }
 
-            this.archiveEntries = entries;
             progress?.report({ message: 'Complete' });
+            return entries;
         } catch (error) {
             if (error instanceof Error && error.message !== 'Cancelled') {
                 vscode.window.showErrorMessage(`Error reading TAR file: ${error.message}`);
             }
-            this.archiveEntries = [];
+            return [];
         }
     }
 
-    private processTarEntry(entries: ArchiveEntry[], entry: tar.ReadEntry) {
+    private processTarEntry(entries: ArchiveEntry[], entry: tarType.ReadEntry) {
         const parts = entry.path.split('/');
+        if (this.isSystemFile(parts)) return;
         let currentLevel = entries;
 
         parts.forEach((part, index) => {
             if (!part.trim()) return;
 
+            const isIntermediate = index < parts.length - 1;
             let existing = currentLevel.find(e => e.name === part);
             if (!existing) {
                 const mtime = entry.mtime && typeof entry.mtime === 'object' ? entry.mtime : new Date();
@@ -410,13 +484,15 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                     size: entry.size || 0,
                     time: mtime.getTime(),
                     date: mtime,
-                    isDirectory: entry.type === 'Directory',
+                    isDirectory: isIntermediate || entry.type === 'Directory',
                     children: []
                 };
                 currentLevel.push(existing);
+            } else if (isIntermediate) {
+                existing.isDirectory = true;
             }
 
-            if (existing.isDirectory && index < parts.length - 1) {
+            if (isIntermediate) {
                 currentLevel = existing.children!;
             }
         });
@@ -427,6 +503,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
         for (const file of files) {
             const parts = file.path.split('/');
+            if (this.isSystemFile(parts)) continue;
             let currentLevel = root;
 
             parts.forEach((part: string, index: number) => {
@@ -458,7 +535,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
     }
 
     private dispose() {
-        this.closePreviewPanel();
+        // Individual document cleanup is handled by the document's dispose() method
     }
 
     private isMarkdownFile(filename: string): boolean {
@@ -516,7 +593,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
             return `![${alt}](${uri && uri !== src ? uri : src}${rest})`;
         });
 
-        const md = new MarkdownIt({ html: false, linkify: true });
+        const md = new (getMarkdownIt())({ html: false, linkify: true });
         return md.render(processed);
     }
 
@@ -533,9 +610,9 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         return Buffer.concat(chunks).toString('utf8');
     }
 
-    private async loadImageFromZip(imagePath: string, password?: string): Promise<{ base64: string; mimeType: string } | null> {
+    private async loadImageFromZip(imagePath: string, archiveFilePath: string, password?: string): Promise<{ base64: string; mimeType: string } | null> {
         try {
-            const directory = await unzipper.Open.file(this.archiveFilePath!);
+            const directory = await getUnzipper().Open.file(archiveFilePath);
             const file = directory.files.find((f: any) => f.path === imagePath);
             if (!file) return null;
             const stream = file.stream(password ?? '');
@@ -551,13 +628,13 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         } catch { return null; }
     }
 
-    private async readTextFromTar(fileUri: string): Promise<string | null> {
+    private async readTextFromTar(fileUri: string, archiveFilePath: string): Promise<string | null> {
         return new Promise<string | null>((resolve, reject) => {
-            const extension = this.getExtension(this.archiveFilePath!);
-            const decompressedStream = this.getDecompressionStream(extension, this.archiveFilePath!);
+            const extension = this.getExtension(archiveFilePath);
+            const decompressedStream = this.getDecompressionStream(extension, archiveFilePath);
             decompressedStream.on('error', reject);
             decompressedStream.pipe(
-                tar.t({
+                getTar().t({
                     onentry: entry => {
                         if (entry.path === fileUri) {
                             const chunks: Buffer[] = [];
@@ -571,16 +648,16 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         });
     }
 
-    private async loadImagesFromTar(imagePaths: string[]): Promise<Map<string, { base64: string; mimeType: string }>> {
+    private async loadImagesFromTar(imagePaths: string[], archiveFilePath: string): Promise<Map<string, { base64: string; mimeType: string }>> {
         const result = new Map<string, { base64: string; mimeType: string }>();
         if (imagePaths.length === 0) return result;
         const remaining = new Set(imagePaths);
         await new Promise<void>((resolve, reject) => {
-            const extension = this.getExtension(this.archiveFilePath!);
-            const decompressedStream = this.getDecompressionStream(extension, this.archiveFilePath!);
+            const extension = this.getExtension(archiveFilePath);
+            const decompressedStream = this.getDecompressionStream(extension, archiveFilePath);
             decompressedStream.on('error', reject);
             decompressedStream.pipe(
-                tar.t({
+                getTar().t({
                     onentry: entry => {
                         if (remaining.has(entry.path)) {
                             remaining.delete(entry.path);
@@ -619,25 +696,21 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         return map[ext] ?? 'application/octet-stream';
     }
 
-    private async previewFile(fileUri: string): Promise<PreviewResult | null> {
-        if (!this.archiveFilePath) {
-            return null;
-        }
-
-        const extension = this.getExtension(this.archiveFilePath);
+    private async previewFile(fileUri: string, archiveFilePath: string, state?: DocumentState): Promise<PreviewResult | null> {
+        const extension = this.getExtension(archiveFilePath);
         if (extension === '.zip') {
-            return this.previewZipFile(fileUri);
+            return this.previewZipFile(fileUri, archiveFilePath, state);
         } else if (extension === '.7z') {
-            return this.preview7zFile(fileUri);
+            return this.preview7zFile(fileUri, archiveFilePath);
         } else if (this.isTarFormat(extension)) {
-            return this.previewTarFile(fileUri);
+            return this.previewTarFile(fileUri, archiveFilePath);
         }
         return null;
     }
 
-    private async previewZipFile(fileUri: string): Promise<PreviewResult | null> {
+    private async previewZipFile(fileUri: string, archiveFilePath: string, state?: DocumentState): Promise<PreviewResult | null> {
         try {
-            const directory = await unzipper.Open.file(this.archiveFilePath!);
+            const directory = state?.zipDirectory ?? await getUnzipper().Open.file(archiveFilePath);
             const file = directory.files.find((f: any) => f.path === fileUri);
             if (!file) {
                 return null;
@@ -647,13 +720,13 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 if (this.isMarkdownFile(fileUri)) {
                     const content = await this.readZipFileAsText(file, pw);
                     const html = await this.renderMarkdownWithImages(content, fileUri,
-                        imgPath => this.loadImageFromZip(imgPath, pw));
+                        imgPath => this.loadImageFromZip(imgPath, archiveFilePath, pw));
                     return { kind: 'markdown', html };
                 }
                 return this.loadFilePreview(file, fileUri, pw);
             };
 
-            let password: string | undefined = this.savedPasswords[this.archiveFilePath!];
+            let password: string | undefined = this.savedPasswords[archiveFilePath];
             if (await this.checkPassword(file, password ?? '')) {
                 return await produceResult(password);
             }
@@ -665,7 +738,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 }
 
                 if (await this.checkPassword(file, password)) {
-                    this.savedPasswords[this.archiveFilePath!] = password;
+                    this.savedPasswords[archiveFilePath] = password;
                     return await produceResult(password);
                 } else {
                     vscode.window.showErrorMessage('Password is incorrect. Please try again.');
@@ -679,21 +752,19 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         }
     }
 
-    private async preview7zFile(fileUri: string): Promise<PreviewResult | null> {
+    private async preview7zFile(fileUri: string, archiveFilePath: string): Promise<PreviewResult | null> {
         try {
             const config = vscode.workspace.getConfiguration('zipViewer');
             const previewLineCount = config.get<number>('previewLineCount') ?? 20;
 
-            let password: string | undefined = this.savedPasswords[this.archiveFilePath!];
+            let password: string | undefined = this.savedPasswords[archiveFilePath];
 
             while (true) {
                 const tempDir = fs.mkdtempSync(path.join(require('os').tmpdir(), '7z-preview-'));
                 let extractFailed = false;
 
                 try {
-                    // Always pass -p<password> — even empty — to prevent 7z from
-                    // waiting for interactive stdin input on encrypted archives.
-                    const sevenZip = Seven.extractFull(this.archiveFilePath!, tempDir, {
+                    const sevenZip = getSeven().extractFull(archiveFilePath, tempDir, {
                         $bin: this.get7zPath(),
                         $raw: [fileUri, `-p${password ?? ''}`]
                     });
@@ -708,7 +779,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 const extractedFilePath = path.join(tempDir, fileUri);
 
                 if (!extractFailed && fs.existsSync(extractedFilePath)) {
-                    if (password) this.savedPasswords[this.archiveFilePath!] = password;
+                    if (password) this.savedPasswords[archiveFilePath] = password;
 
                     let result: PreviewResult;
                     if (this.isImageFile(fileUri)) {
@@ -719,7 +790,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                         const imageRefs = this.extractImageRefs(mdContent, fileUri);
                         if (imageRefs.length > 0) {
                             await new Promise<void>(res => {
-                                const sz = Seven.extractFull(this.archiveFilePath!, tempDir, {
+                                const sz = getSeven().extractFull(archiveFilePath, tempDir, {
                                     $bin: this.get7zPath(),
                                     $raw: [...imageRefs, `-p${password ?? ''}`]
                                 });
@@ -747,11 +818,9 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 fs.rmSync(tempDir, { recursive: true, force: true });
 
                 if (!extractFailed) {
-                    // Extraction succeeded but file was not found in the archive
                     return null;
                 }
 
-                // Extraction failed — treat as a password error
                 if (password !== undefined) {
                     vscode.window.showErrorMessage('Password is incorrect. Please try again.');
                 }
@@ -768,17 +837,12 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         }
     }
 
-    private async previewTarFile(fileUri: string): Promise<PreviewResult | null> {
-        if (!this.archiveFilePath) {
-            vscode.window.showErrorMessage('File path is not available.');
-            return null;
-        }
-
+    private async previewTarFile(fileUri: string, archiveFilePath: string): Promise<PreviewResult | null> {
         if (this.isMarkdownFile(fileUri)) {
-            const content = await this.readTextFromTar(fileUri);
+            const content = await this.readTextFromTar(fileUri, archiveFilePath);
             if (content === null) return null;
             const imagePaths = this.extractImageRefs(content, fileUri);
-            const imageMap = await this.loadImagesFromTar(imagePaths);
+            const imageMap = await this.loadImagesFromTar(imagePaths, archiveFilePath);
             const html = await this.renderMarkdownWithImages(content, fileUri,
                 async archivePath => imageMap.get(archivePath) ?? null);
             return { kind: 'markdown', html };
@@ -788,12 +852,12 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         const mimeType = this.getMimeType(fileUri);
 
         return new Promise<PreviewResult | null>((resolve, reject) => {
-            const extension = this.getExtension(this.archiveFilePath!);
-            const decompressedStream = this.getDecompressionStream(extension, this.archiveFilePath!);
+            const extension = this.getExtension(archiveFilePath);
+            const decompressedStream = this.getDecompressionStream(extension, archiveFilePath);
             decompressedStream.on('error', reject);
 
             decompressedStream.pipe(
-                tar.t({
+                getTar().t({
                     onentry: entry => {
                         if (entry.path === fileUri) {
                             const config = vscode.workspace.getConfiguration('zipViewer');
@@ -920,25 +984,25 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         });
     }
 
-    private showPreviewPanel(title: string, result: PreviewResult) {
-        if (!this.previewPanel) {
-            this.previewPanel = vscode.window.createWebviewPanel(
+    private showPreviewPanel(title: string, result: PreviewResult, state: DocumentState) {
+        if (!state.previewPanel) {
+            state.previewPanel = vscode.window.createWebviewPanel(
                 'filePreview',
                 `Preview: ${title}`,
                 vscode.ViewColumn.Beside,
-                {}
+                { enableScripts: false }
             );
 
-            this.previewPanel.onDidDispose(() => {
-                this.previewPanel = undefined;
+            state.previewPanel.onDidDispose(() => {
+                state.previewPanel = undefined;
             });
         }
 
-        this.previewPanel.title = `Preview: ${title}`;
+        state.previewPanel.title = `Preview: ${title}`;
         if (result.kind === 'image') {
-            this.previewPanel.webview.html = `<html><body style="margin:0;background:#1e1e1e;display:flex;justify-content:center;align-items:center;min-height:100vh;"><img src="data:${result.mimeType};base64,${result.base64}" style="max-width:100%;max-height:100vh;object-fit:contain;"></body></html>`;
+            state.previewPanel.webview.html = `<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:;"></head><body style="margin:0;background:#1e1e1e;display:flex;justify-content:center;align-items:center;min-height:100vh;"><img src="data:${result.mimeType};base64,${result.base64}" style="max-width:100%;max-height:100vh;object-fit:contain;"></body></html>`;
         } else if (result.kind === 'markdown') {
-            this.previewPanel.webview.html = `<!DOCTYPE html>
+            state.previewPanel.webview.html = `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;line-height:1.6;padding:20px 40px;max-width:860px;margin:0 auto;color:var(--vscode-foreground,#ccc);background:var(--vscode-editor-background,#1e1e1e)}
 img{max-width:100%;height:auto}
@@ -954,7 +1018,7 @@ a{color:var(--vscode-textLink-foreground,#4fc1ff)}
 h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
 </style></head><body>${result.html}</body></html>`;
         } else {
-            this.previewPanel.webview.html = `<html><body><pre>${this.escapeHtml(result.content)}</pre></body></html>`;
+            state.previewPanel.webview.html = `<html><body style="margin:0;padding:8px;background:#1e1e1e;color:#ccc;font-family:'SF Mono',Consolas,'Courier New',monospace;font-size:13px"><pre style="white-space:pre-wrap;word-break:break-all;margin:0">${this.escapeHtml(result.content)}</pre></body></html>`;
         }
     }
 
@@ -967,37 +1031,33 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
             .replace(/'/g, '&#039;');
     }
 
-    private closePreviewPanel() {
-        if (this.previewPanel) {
-            this.previewPanel.dispose();
-            this.previewPanel = undefined;
+    private closePreviewPanel(state: DocumentState) {
+        if (state.previewPanel) {
+            state.previewPanel.dispose();
+            state.previewPanel = undefined;
         }
     }
 
-    private async extractFile(fileUri: string) {
-        if (!this.archiveFilePath) {
-            return;
-        }
-
-        const extension = this.getExtension(this.archiveFilePath);
+    private async extractFile(fileUri: string, archiveFilePath: string) {
+        const extension = this.getExtension(archiveFilePath);
         if (extension === '.zip') {
-            await this.extractZipFile(fileUri);
+            await this.extractZipFile(fileUri, archiveFilePath);
         } else if (extension === '.7z') {
-            await this.extract7zFile(fileUri);
+            await this.extract7zFile(fileUri, archiveFilePath);
         } else if (this.isTarFormat(extension)) {
-            await this.extractTarFile(fileUri);
+            await this.extractTarFile(fileUri, archiveFilePath);
         }
     }
 
-    private async extractZipFile(fileUri: string) {
+    private async extractZipFile(fileUri: string, archiveFilePath: string) {
         try {
-            const directory = await unzipper.Open.file(this.archiveFilePath!);
+            const directory = await getUnzipper().Open.file(archiveFilePath);
             const file = directory.files.find((f: any) => f.path === fileUri);
             if (!file) {
                 return;
             }
 
-            let password: string | undefined = this.savedPasswords[this.archiveFilePath!];
+            let password: string | undefined = this.savedPasswords[archiveFilePath];
 
             if (!(await this.checkPassword(file, password ?? ''))) {
                 password = await this.promptForPassword();
@@ -1005,11 +1065,11 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
                     vscode.window.showErrorMessage('Extraction failed. Password is invalid or not provided.');
                     return;
                 }
-                this.savedPasswords[this.archiveFilePath!] = password;
+                this.savedPasswords[archiveFilePath] = password;
             }
 
             const saveUri = await vscode.window.showSaveDialog({
-                defaultUri: vscode.Uri.file(path.join(path.dirname(this.archiveFilePath!), path.basename(file.path ?? 'default.zip'))),
+                defaultUri: vscode.Uri.file(path.join(path.dirname(archiveFilePath), path.basename(file.path ?? 'default.zip'))),
             });
 
             if (!saveUri) return;
@@ -1030,16 +1090,16 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
         }
     }
 
-    private async extract7zFile(fileUri: string) {
+    private async extract7zFile(fileUri: string, archiveFilePath: string) {
         try {
             const saveUri = await vscode.window.showSaveDialog({
-                defaultUri: vscode.Uri.file(path.join(path.dirname(this.archiveFilePath!), path.basename(fileUri))),
+                defaultUri: vscode.Uri.file(path.join(path.dirname(archiveFilePath), path.basename(fileUri))),
             });
 
             if (!saveUri) return;
 
             const tempDir = fs.mkdtempSync(path.join(require('os').tmpdir(), '7z-extract-'));
-            const sevenZip = Seven.extractFull(this.archiveFilePath!, tempDir, {
+            const sevenZip = getSeven().extractFull(archiveFilePath, tempDir, {
                 $bin: this.get7zPath(),
                 $raw: [fileUri]
             });
@@ -1065,23 +1125,19 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
         }
     }
 
-    private async extractTarFile(fileUri: string) {
-        if (!this.archiveFilePath) {
-            return;
-        }
-
+    private async extractTarFile(fileUri: string, archiveFilePath: string) {
         const saveUri = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.file(path.join(path.dirname(this.archiveFilePath!), path.basename(fileUri))),
+            defaultUri: vscode.Uri.file(path.join(path.dirname(archiveFilePath), path.basename(fileUri))),
         });
 
         if (!saveUri) return;
 
-        const extension = this.getExtension(this.archiveFilePath);
+        const extension = this.getExtension(archiveFilePath);
 
         try {
-            const decompressedStream = this.getDecompressionStream(extension, this.archiveFilePath!);
+            const decompressedStream = this.getDecompressionStream(extension, archiveFilePath);
 
-            const extractStream = tar.extract({
+            const extractStream = getTar().extract({
                 cwd: path.dirname(saveUri.fsPath),
                 strip: 1,
                 filter: (p: string) => p === fileUri
@@ -1098,26 +1154,22 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
         }
     }
 
-    private async extractFolder(folderUri: string) {
-        if (!this.archiveFilePath) {
-            return;
-        }
-
-        const extension = this.getExtension(this.archiveFilePath);
+    private async extractFolder(folderUri: string, archiveFilePath: string) {
+        const extension = this.getExtension(archiveFilePath);
         if (extension === '.zip') {
-            await this.extractZipFolder(folderUri);
+            await this.extractZipFolder(folderUri, archiveFilePath);
         } else if (extension === '.7z') {
-            await this.extract7zFolder(folderUri);
+            await this.extract7zFolder(folderUri, archiveFilePath);
         } else if (this.isTarFormat(extension)) {
-            await this.extractTarFolder(folderUri);
+            await this.extractTarFolder(folderUri, archiveFilePath);
         }
     }
 
-    private async extractZipFolder(folderUri: string) {
+    private async extractZipFolder(folderUri: string, archiveFilePath: string) {
         try {
-            const directory = await unzipper.Open.file(this.archiveFilePath!);
+            const directory = await getUnzipper().Open.file(archiveFilePath);
             const folderFiles = directory.files.filter((f: any) => f.path.startsWith(folderUri + '/'));
-            let password: string | undefined = this.savedPasswords[this.archiveFilePath!];
+            let password: string | undefined = this.savedPasswords[archiveFilePath];
 
             for (const file of folderFiles) {
                 if (!(await this.checkPassword(file, password ?? ''))) {
@@ -1126,7 +1178,7 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
                         vscode.window.showErrorMessage('Extraction failed. Password is invalid or not provided.');
                         return;
                     }
-                    this.savedPasswords[this.archiveFilePath!] = password;
+                    this.savedPasswords[archiveFilePath] = password;
                     break;
                 }
             }
@@ -1135,7 +1187,7 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
                 canSelectFolders: true,
                 canSelectFiles: false,
                 canSelectMany: false,
-                defaultUri: vscode.Uri.file(path.dirname(this.archiveFilePath!))
+                defaultUri: vscode.Uri.file(path.dirname(archiveFilePath))
             });
 
             if (!saveUri || saveUri.length === 0) return;
@@ -1167,26 +1219,22 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
         }
     }
 
-    private async extractTarFolder(folderUri: string) {
-        if (!this.archiveFilePath) {
-            return;
-        }
-
+    private async extractTarFolder(folderUri: string, archiveFilePath: string) {
         const saveUri = await vscode.window.showOpenDialog({
             canSelectFolders: true,
             canSelectFiles: false,
             canSelectMany: false,
-            defaultUri: vscode.Uri.file(path.dirname(this.archiveFilePath!))
+            defaultUri: vscode.Uri.file(path.dirname(archiveFilePath))
         });
 
         if (!saveUri || saveUri.length === 0) return;
 
-        const extension = this.getExtension(this.archiveFilePath);
+        const extension = this.getExtension(archiveFilePath);
 
         try {
-            const decompressedStream = this.getDecompressionStream(extension, this.archiveFilePath!);
+            const decompressedStream = this.getDecompressionStream(extension, archiveFilePath);
 
-            const extractStream = tar.extract({
+            const extractStream = getTar().extract({
                 cwd: saveUri[0].fsPath,
                 strip: 1,
                 filter: (p: string) => p.startsWith(folderUri)
@@ -1203,18 +1251,18 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
         }
     }
 
-    private async extract7zFolder(folderUri: string) {
+    private async extract7zFolder(folderUri: string, archiveFilePath: string) {
         try {
             const saveUri = await vscode.window.showOpenDialog({
                 canSelectFolders: true,
                 canSelectFiles: false,
                 canSelectMany: false,
-                defaultUri: vscode.Uri.file(path.dirname(this.archiveFilePath!))
+                defaultUri: vscode.Uri.file(path.dirname(archiveFilePath))
             });
 
             if (!saveUri || saveUri.length === 0) return;
 
-            const sevenZip = Seven.extractFull(this.archiveFilePath!, saveUri[0].fsPath, {
+            const sevenZip = getSeven().extractFull(archiveFilePath, saveUri[0].fsPath, {
                 $bin: this.get7zPath(),
                 $raw: [folderUri + '/*']
             });
@@ -1232,8 +1280,8 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
         }
     }
 
-    private async extractSelected(selectedPaths: string[]) {
-        if (!this.archiveFilePath || selectedPaths.length === 0) {
+    private async extractSelected(selectedPaths: string[], archiveFilePath: string) {
+        if (selectedPaths.length === 0) {
             return;
         }
 
@@ -1241,13 +1289,13 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
             canSelectFolders: true,
             canSelectFiles: false,
             canSelectMany: false,
-            defaultUri: vscode.Uri.file(path.dirname(this.archiveFilePath)),
+            defaultUri: vscode.Uri.file(path.dirname(archiveFilePath)),
             title: `Extract ${selectedPaths.length} selected items`
         });
 
         if (!saveUri || saveUri.length === 0) return;
 
-        const extension = this.getExtension(this.archiveFilePath);
+        const extension = this.getExtension(archiveFilePath);
 
         await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
@@ -1256,11 +1304,11 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
         }, async (progress) => {
             try {
                 if (extension === '.zip') {
-                    await this.extractSelectedZip(selectedPaths, saveUri[0].fsPath, progress);
+                    await this.extractSelectedZip(selectedPaths, saveUri[0].fsPath, progress, archiveFilePath);
                 } else if (extension === '.7z') {
-                    await this.extractSelected7z(selectedPaths, saveUri[0].fsPath, progress);
+                    await this.extractSelected7z(selectedPaths, saveUri[0].fsPath, progress, archiveFilePath);
                 } else if (this.isTarFormat(extension)) {
-                    await this.extractSelectedTar(selectedPaths, saveUri[0].fsPath, progress);
+                    await this.extractSelectedTar(selectedPaths, saveUri[0].fsPath, progress, archiveFilePath);
                 }
                 vscode.window.showInformationMessage(`${selectedPaths.length} items successfully extracted to ${saveUri[0].fsPath}`);
             } catch (error) {
@@ -1271,9 +1319,9 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
         });
     }
 
-    private async extractSelectedZip(selectedPaths: string[], destinationPath: string, progress: vscode.Progress<{ message?: string; increment?: number }>) {
-        const directory = await unzipper.Open.file(this.archiveFilePath!);
-        let password: string | undefined = this.savedPasswords[this.archiveFilePath!];
+    private async extractSelectedZip(selectedPaths: string[], destinationPath: string, progress: vscode.Progress<{ message?: string; increment?: number }>, archiveFilePath: string) {
+        const directory = await getUnzipper().Open.file(archiveFilePath);
+        let password: string | undefined = this.savedPasswords[archiveFilePath];
 
         const filesToExtract = directory.files.filter(f =>
             selectedPaths.some(selected => f.path === selected || f.path.startsWith(selected + '/'))
@@ -1292,7 +1340,7 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
                     if (!password || !(await this.checkPassword(file, password))) {
                         throw new Error('Invalid password');
                     }
-                    this.savedPasswords[this.archiveFilePath!] = password;
+                    this.savedPasswords[archiveFilePath] = password;
                 }
 
                 const filePath = path.join(destinationPath, file.path);
@@ -1309,15 +1357,15 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
         }
     }
 
-    private async extractSelectedTar(selectedPaths: string[], destinationPath: string, progress: vscode.Progress<{ message?: string; increment?: number }>) {
-        const extension = this.getExtension(this.archiveFilePath!);
-        const decompressedStream = this.getDecompressionStream(extension, this.archiveFilePath!);
+    private async extractSelectedTar(selectedPaths: string[], destinationPath: string, progress: vscode.Progress<{ message?: string; increment?: number }>, archiveFilePath: string) {
+        const extension = this.getExtension(archiveFilePath);
+        const decompressedStream = this.getDecompressionStream(extension, archiveFilePath);
 
         let extractedCount = 0;
 
         await pipelineAsync(
             decompressedStream,
-            tar.extract({
+            getTar().extract({
                 cwd: destinationPath,
                 filter: (entryPath: string) => {
                     return selectedPaths.some(selected =>
@@ -1335,7 +1383,7 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
         );
     }
 
-    private async extractSelected7z(selectedPaths: string[], destinationPath: string, progress: vscode.Progress<{ message?: string; increment?: number }>) {
+    private async extractSelected7z(selectedPaths: string[], destinationPath: string, progress: vscode.Progress<{ message?: string; increment?: number }>, archiveFilePath: string) {
         for (let i = 0; i < selectedPaths.length; i++) {
             const selectedPath = selectedPaths[i];
             progress.report({
@@ -1343,7 +1391,7 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
                 increment: (100 / selectedPaths.length)
             });
 
-            const sevenZip = Seven.extractFull(this.archiveFilePath!, destinationPath, {
+            const sevenZip = getSeven().extractFull(archiveFilePath, destinationPath, {
                 $bin: this.get7zPath(),
                 $raw: [selectedPath]
             });
@@ -1358,7 +1406,6 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
     private getExtension(filePath: string): string {
         const lowerPath = filePath.toLowerCase();
 
-        // Map lowercase suffix → canonical extension (preserving uppercase Z in .tar.Z)
         const compoundExtensions: { [lower: string]: string } = {
             '.tar.gz': '.tar.gz', '.tar.xz': '.tar.xz', '.tar.bz2': '.tar.bz2',
             '.tar.z': '.tar.Z',   '.tar.lz': '.tar.lz',  '.tar.lzma': '.tar.lzma',
@@ -1408,35 +1455,39 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
         return total;
     }
 
-    private getWebviewContent(files: ArchiveEntry[]): string {
-        const renderTree = (files: ArchiveEntry[], depth = 0, parentPath = ''): string => {
-            return files.map(file => {
-                const fullPath = parentPath ? `${parentPath}/${file.name}` : file.name;
-                const indent = `padding-left: ${depth * 20 + 30}px;`;
-                const dateStr = file.date ? file.date.toLocaleString('ja-JP') : '';
+    private renderTreeHtml(files: ArchiveEntry[], depth = 0, parentPath = ''): string {
+        const autoExpand = depth === 0 && files.length === 1 && files[0].isDirectory;
+        return files.map(file => {
+            const fullPath = parentPath ? `${parentPath}/${file.name}` : file.name;
+            const indent = `padding-left: ${depth * 20 + 30}px;`;
+            const dateStr = file.date ? file.date.toLocaleString('ja-JP') : '';
 
-                if (file.isDirectory) {
-                    return `
-                        <div style="padding-left: ${depth * 20}px;" class="folder" data-uri="${this.escapeHtml(fullPath)}">
-                            <div class="file-info" oncontextmenu="handleFolderRightClick(event, '${this.escapeHtml(fullPath)}')">
-                                <input type="checkbox" class="checkbox" data-path="${this.escapeHtml(fullPath)}" onchange="handleCheckboxChange(event)">
-                                <span class="caret" onclick="toggleFolder(event)">${this.escapeHtml(file.name)}</span>
-                            </div>
-                            <div class="nested">${renderTree(file.children!, depth + 1, fullPath)}</div>
-                        </div>`;
-                } else {
-                    return `
-                        <div style="${indent}" class="file" data-uri="${this.escapeHtml(fullPath)}" oncontextmenu="handleFileRightClick(event, '${this.escapeHtml(fullPath)}')">
-                            <div class="file-info-row" data-uri="${this.escapeHtml(fullPath)}">
-                                <input type="checkbox" class="checkbox" data-path="${this.escapeHtml(fullPath)}" data-size="${file.size}" onchange="handleCheckboxChange(event)">
-                                <span class="file-name">${this.escapeHtml(file.name)}</span>
-                                <span class="file-size">${file.size.toLocaleString()} bytes</span>
-                                <span class="file-date">${dateStr}</span>
-                            </div>
-                        </div>`;
-                }
-            }).join('');
-        };
+            if (file.isDirectory) {
+                const expanded = autoExpand;
+                return `
+                    <div style="padding-left: ${depth * 20}px;" class="folder" data-uri="${this.escapeHtml(fullPath)}">
+                        <div class="file-info" oncontextmenu="handleFolderRightClick(event, '${this.escapeHtml(fullPath)}')">
+                            <input type="checkbox" class="checkbox" data-path="${this.escapeHtml(fullPath)}" onchange="handleCheckboxChange(event)">
+                            <span class="caret${expanded ? ' caret-down' : ''}" onclick="toggleFolder(event)">${this.escapeHtml(file.name)}</span>
+                        </div>
+                        <div class="nested${expanded ? ' active' : ''}"${expanded ? ' style="display:block"' : ''}>${this.renderTreeHtml(file.children!, depth + 1, fullPath)}</div>
+                    </div>`;
+            } else {
+                return `
+                    <div style="${indent}" class="file" data-uri="${this.escapeHtml(fullPath)}" oncontextmenu="handleFileRightClick(event, '${this.escapeHtml(fullPath)}')">
+                        <div class="file-info-row" data-uri="${this.escapeHtml(fullPath)}">
+                            <input type="checkbox" class="checkbox" data-path="${this.escapeHtml(fullPath)}" data-size="${file.size}" onchange="handleCheckboxChange(event)">
+                            <span class="file-name">${this.escapeHtml(file.name)}</span>
+                            <span class="file-date">${dateStr}</span>
+                            <span class="file-size">${file.size.toLocaleString()} bytes</span>
+                        </div>
+                    </div>`;
+            }
+        }).join('');
+    }
+
+    private getWebviewContent(files: ArchiveEntry[], webview: vscode.Webview, loading = false): string {
+        const nonce = crypto.randomBytes(16).toString('hex');
 
         return `
             <!DOCTYPE html>
@@ -1444,6 +1495,7 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
             <head>
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
                 <title>Zip Viewer</title>
                 <style>
                     body {
@@ -1451,6 +1503,7 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
                         font-size: 12px;
                         padding: 0;
                         margin: 0;
+                        padding-bottom: 48px;
                         color: var(--vscode-foreground);
                         background-color: var(--vscode-editor-background);
                     }
@@ -1463,6 +1516,8 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
                         display: flex;
                         gap: 8px;
                         align-items: center;
+                        flex-wrap: nowrap;
+                        overflow-x: auto;
                         z-index: 100;
                     }
                     .button {
@@ -1474,6 +1529,8 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
                         cursor: pointer;
                         font-size: 11px;
                         font-family: inherit;
+                        white-space: nowrap;
+                        flex-shrink: 0;
                     }
                     .button:hover {
                         background: var(--vscode-button-hoverBackground);
@@ -1520,27 +1577,34 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
                         flex-shrink: 0;
                     }
                     .file-name {
-                        flex: 1;
+                        flex: 1 1 auto;
+                        min-width: 80px;
                         cursor: pointer;
                         white-space: nowrap;
                         overflow: hidden;
                         text-overflow: ellipsis;
                         user-select: none;
                     }
-                    .file-name:hover {
+                    .file-info-row:not(.selected) .file-name:hover {
                         color: var(--vscode-textLink-foreground);
                     }
                     .file-size {
-                        width: 120px;
+                        flex: 0 0 auto;
                         text-align: right;
                         color: var(--vscode-descriptionForeground);
-                        flex-shrink: 0;
+                        white-space: nowrap;
                     }
                     .file-date {
-                        width: 120px;
+                        flex: 0 0 auto;
                         text-align: right;
                         color: var(--vscode-descriptionForeground);
-                        flex-shrink: 0;
+                        white-space: nowrap;
+                    }
+                    @container (max-width: 500px) {
+                        .file-size { display: none; }
+                    }
+                    @media (max-width: 500px) {
+                        .file-size { display: none; }
                     }
                     .nested {
                         display: none;
@@ -1575,14 +1639,18 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
                         color: var(--vscode-list-activeSelectionForeground);
                     }
                     .ad-space {
-                        margin-top: 24px;
+                        position: fixed;
+                        bottom: 0;
+                        left: 0;
+                        right: 0;
                         padding: 10px 14px;
-                        border: 1px dashed var(--vscode-panel-border);
-                        border-radius: 4px;
+                        background: var(--vscode-editor-background);
+                        border-top: 1px solid var(--vscode-panel-border);
                         display: flex;
                         align-items: center;
                         gap: 10px;
-                        opacity: 0.5;
+                        opacity: 0.7;
+                        z-index: 50;
                     }
                     .ad-label {
                         font-size: 9px;
@@ -1611,9 +1679,33 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
                     </div>
                 </div>
                 <div class="file-tree">
-                    ${renderTree(files)}
+                    ${loading
+                        ? '<div style="padding: 20px; color: var(--vscode-descriptionForeground);">Loading...</div>'
+                        : this.renderTreeHtml(files)}
                 </div>
-                <script>
+                <script nonce="${nonce}">
+function autoExpandSingleRootFolder() {
+    const tree = document.querySelector('.file-tree');
+    const rootItems = Array.from(tree.children).filter(el => el.classList.contains('folder') || el.classList.contains('file'));
+    console.log('autoExpand: rootItems count =', rootItems.length, rootItems.map(el => el.getAttribute('data-uri')));
+    if (rootItems.length === 1 && rootItems[0].classList.contains('folder')) {
+        const folder = rootItems[0];
+        const nested = folder.querySelector('.nested');
+        const caret = folder.querySelector('.caret');
+        if (nested) {
+            nested.style.display = 'block';
+            if (caret) caret.classList.add('caret-down');
+        }
+    }
+}
+
+window.addEventListener('message', event => {
+    const msg = event.data;
+    if (msg.command === 'updateTree') {
+        document.querySelector('.file-tree').innerHTML = msg.html;
+        setTimeout(autoExpandSingleRootFolder, 0);
+    }
+});
                     const vscode = acquireVsCodeApi();
                     let selectedPaths = new Set();
                     let selectedSize = 0;
@@ -1645,16 +1737,15 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
                         const checkbox = event.target;
                         const path = checkbox.dataset.path;
                         const size = parseInt(checkbox.dataset.size || '0');
+                        const isFolderCheckbox = checkbox.parentElement.classList.contains('file-info');
 
                         if (checkbox.checked) {
                             selectedPaths.add(path);
                             selectedSize += size;
-                            
-                            // Check child elements too
-                            const parent = checkbox.closest('.folder');
-                            if (parent) {
-                                const children = parent.querySelectorAll('.nested .checkbox');
-                                children.forEach(child => {
+
+                            if (isFolderCheckbox) {
+                                const folder = checkbox.closest('.folder');
+                                folder.querySelectorAll('.nested .checkbox').forEach(child => {
                                     if (!child.checked) {
                                         child.checked = true;
                                         selectedPaths.add(child.dataset.path);
@@ -1665,18 +1756,29 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
                         } else {
                             selectedPaths.delete(path);
                             selectedSize -= size;
-                            
-                            // Uncheck child elements too
-                            const parent = checkbox.closest('.folder');
-                            if (parent) {
-                                const children = parent.querySelectorAll('.nested .checkbox');
-                                children.forEach(child => {
+
+                            if (isFolderCheckbox) {
+                                const folder = checkbox.closest('.folder');
+                                folder.querySelectorAll('.nested .checkbox').forEach(child => {
                                     if (child.checked) {
                                         child.checked = false;
                                         selectedPaths.delete(child.dataset.path);
                                         selectedSize -= parseInt(child.dataset.size || '0');
                                     }
                                 });
+                            }
+
+                            // Uncheck every ancestor folder — they're no longer fully selected
+                            let current = checkbox.closest('.folder, .file');
+                            while (current) {
+                                const ancestor = current.parentElement && current.parentElement.closest('.folder');
+                                if (!ancestor) break;
+                                const ancestorCheckbox = ancestor.querySelector(':scope > .file-info > .checkbox');
+                                if (ancestorCheckbox && ancestorCheckbox.checked) {
+                                    ancestorCheckbox.checked = false;
+                                    selectedPaths.delete(ancestorCheckbox.dataset.path);
+                                }
+                                current = ancestor;
                             }
                         }
 
@@ -1721,8 +1823,8 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
 
                     function extractSelected() {
                         if (selectedPaths.size > 0) {
-                            vscode.postMessage({ 
-                                command: 'extractSelected', 
+                            vscode.postMessage({
+                                command: 'extractSelected',
                                 selectedPaths: Array.from(selectedPaths)
                             });
                         }
@@ -1742,13 +1844,36 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Click on a file row to toggle preview
-    document.querySelector('.file-tree').addEventListener('click', (event) => {
-        if (event.target.closest('input')) return; // ignore checkbox clicks
+    function isMarkdown(uri) {
+        const lower = uri.toLowerCase();
+        return lower.endsWith('.md') || lower.endsWith('.markdown');
+    }
+
+    document.querySelector('.file-tree').addEventListener('mousedown', (event) => {
+        if (event.target.closest('input')) return;
+        if (event.button !== 0) return;
         const row = event.target.closest('.file-info-row');
         if (!row) return;
         const fileUri = row.getAttribute('data-uri');
-        if (!fileUri) return;
+        if (!fileUri || isMarkdown(fileUri)) return;
+
+        setActiveRow(fileUri);
+        vscode.postMessage({ command: 'previewFile', fileUri: fileUri });
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (activePreviewUri && !isMarkdown(activePreviewUri)) {
+            setActiveRow(null);
+            vscode.postMessage({ command: 'closePreview' });
+        }
+    });
+
+    document.querySelector('.file-tree').addEventListener('click', (event) => {
+        if (event.target.closest('input')) return;
+        const row = event.target.closest('.file-info-row');
+        if (!row) return;
+        const fileUri = row.getAttribute('data-uri');
+        if (!fileUri || !isMarkdown(fileUri)) return;
 
         if (activePreviewUri === fileUri) {
             setActiveRow(null);
@@ -1759,15 +1884,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Click outside file rows to close preview
-    document.addEventListener('click', (event) => {
-        if (!event.target.closest('.file-info-row') && activePreviewUri) {
-            setActiveRow(null);
-            vscode.postMessage({ command: 'closePreview' });
-        }
-    });
-
-    // Arrow key navigation through visible file rows
     document.addEventListener('keydown', (event) => {
         if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
 

@@ -11,7 +11,9 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "customEditors": [
@@ -87,10 +89,11 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run package",
-    "compile": "webpack",
+    "vscode:prepublish": "chmod +x node_modules/7zip-bin/mac/arm64/7za node_modules/7zip-bin/mac/x64/7za node_modules/7zip-bin/linux/arm/7za node_modules/7zip-bin/linux/arm64/7za node_modules/7zip-bin/linux/ia32/7za node_modules/7zip-bin/linux/x64/7za 2>/dev/null; npm run package",
+    "compile": "webpack && cat dist/extension.js > $HOME/.vscode/extensions/takeshi-fuchi.zip-viewer-2.1.0/dist/extension.js",
     "watch": "webpack --watch",
     "package": "webpack --mode production --devtool hidden-source-map",
+    "deploy": "npm run package && cat dist/extension.js > $HOME/.vscode/extensions/takeshi-fuchi.zip-viewer-2.1.0/dist/extension.js && echo 'Deployed. Reload Window in VS Code to apply.'",
     "test": "TS_NODE_PROJECT=tsconfig.test.json mocha",
     "test:unit": "TS_NODE_PROJECT=tsconfig.test.json mocha --spec test/suite/utils.test.ts",
     "test:archive": "TS_NODE_PROJECT=tsconfig.test.json mocha --spec test/suite/archive.test.ts",
@@ -108,6 +111,7 @@
     "eslint": "^8.0.0",
     "jsdom": "^29.1.1",
     "mocha": "^11.7.6",
+    "playwright": "^1.60.0",
     "ts-loader": "^9.5.4",
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
@@ -126,10 +130,5 @@
     "unbzip2-stream": "^1.4.3",
     "unzipper": "^0.10.14"
   },
-  "repository": {
-    "type": "git",
-    "url": ""
-  },
-  "license": "UNLICENSED",
-  "private": true
+  "license": "MIT"
 }

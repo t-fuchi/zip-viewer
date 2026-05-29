@@ -141,8 +141,7 @@ describe('Large text preview — ZIP (loadFilePreview)', () => {
 
 describe('Large text preview — TAR', () => {
     it('truncates big.txt in big-text.tar.gz to default 20 lines', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'big-text.tar.gz');
-        const result = await provider.previewTarFile('big.txt');
+        const result = await provider.previewTarFile('big.txt', path.join(TEST_DIR, 'big-text.tar.gz'));
         assert.ok(result !== null);
         assert.strictEqual(result.kind, 'text');
         const lines = result.content.split('\n').filter((l: string) => l.length > 0);
@@ -152,8 +151,7 @@ describe('Large text preview — TAR', () => {
 
     it('respects custom previewLineCount = 5 for TAR', async () => {
         await withLineCount(5, async () => {
-            provider.archiveFilePath = path.join(TEST_DIR, 'big-text.tar.gz');
-            const result = await provider.previewTarFile('big.txt');
+            const result = await provider.previewTarFile('big.txt', path.join(TEST_DIR, 'big-text.tar.gz'));
             assert.ok(result !== null);
             assert.strictEqual(result.kind, 'text');
             const lines = result.content.split('\n').filter((l: string) => l.length > 0);
@@ -162,8 +160,7 @@ describe('Large text preview — TAR', () => {
     });
 
     it('does not include lines beyond the limit in TAR preview', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'big-text.tar.gz');
-        const result = await provider.previewTarFile('big.txt');
+        const result = await provider.previewTarFile('big.txt', path.join(TEST_DIR, 'big-text.tar.gz'));
         assert.ok(result !== null);
         assert.ok(!result.content.includes(`line ${DEFAULT_LINE_COUNT + 1}`));
     });
@@ -173,8 +170,7 @@ describe('Large text preview — TAR', () => {
 
 describe('Large text preview — 7Z', () => {
     it('truncates big.txt in big-text.zip to default 20 lines', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'big-text.zip');
-        const result = await provider.preview7zFile('big.txt');
+        const result = await provider.preview7zFile('big.txt', path.join(TEST_DIR, 'big-text.zip'));
         assert.ok(result !== null);
         assert.strictEqual(result.kind, 'text');
         const lines = result.content.split('\n').filter((l: string) => l.length > 0);
@@ -184,8 +180,7 @@ describe('Large text preview — 7Z', () => {
 
     it('respects custom previewLineCount = 3 for 7Z', async () => {
         await withLineCount(3, async () => {
-            provider.archiveFilePath = path.join(TEST_DIR, 'big-text.zip');
-            const result = await provider.preview7zFile('big.txt');
+            const result = await provider.preview7zFile('big.txt', path.join(TEST_DIR, 'big-text.zip'));
             assert.ok(result !== null);
             const lines = result.content.split('\n').filter((l: string) => l.length > 0);
             assert.ok(lines.length <= 3, `expected <= 3, got ${lines.length}`);
@@ -193,8 +188,7 @@ describe('Large text preview — 7Z', () => {
     });
 
     it('does not include lines beyond the limit in 7Z preview', async () => {
-        provider.archiveFilePath = path.join(TEST_DIR, 'big-text.zip');
-        const result = await provider.preview7zFile('big.txt');
+        const result = await provider.preview7zFile('big.txt', path.join(TEST_DIR, 'big-text.zip'));
         assert.ok(result !== null);
         assert.ok(!result.content.includes(`line ${DEFAULT_LINE_COUNT + 1}`));
     });
