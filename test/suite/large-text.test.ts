@@ -135,6 +135,47 @@ describe('Large text preview — ZIP (loadFilePreview)', () => {
         assert.strictEqual(result.kind, 'text');
         assert.ok(result.content.includes('line 1'));
     });
+
+    it('previewLineCount=1 returns exactly one line', async () => {
+        await withLineCount(1, async () => {
+            const result = await provider.loadFilePreview(makeMockFile(50), 'readme.txt', undefined);
+            assert.strictEqual(result.kind, 'text');
+            const lines = result.content.split('\n').filter((l: string) => l.length > 0);
+            assert.strictEqual(lines.length, 1);
+            assert.strictEqual(lines[0], 'line 1');
+        });
+    });
+
+    it('empty file returns empty text content', async () => {
+        const mockFile = {
+            stream: () => {
+                const s = new Readable({ read() {} });
+                s.push(Buffer.from(''));
+                s.push(null);
+                return s;
+            }
+        };
+        const result = await provider.loadFilePreview(mockFile, 'readme.txt', undefined);
+        assert.strictEqual(result.kind, 'text');
+        assert.strictEqual(result.content, '');
+    });
+
+    it('last line of truncated preview is line ${DEFAULT_LINE_COUNT}', async () => {
+        const result = await provider.loadFilePreview(makeMockFile(100), 'readme.txt', undefined);
+        assert.strictEqual(result.kind, 'text');
+        const lines = result.content.split('\n');
+        assert.strictEqual(lines[lines.length - 1], `line ${DEFAULT_LINE_COUNT}`);
+    });
+
+    it('returns all lines when previewLineCount exceeds file length', async () => {
+        await withLineCount(200, async () => {
+            const result = await provider.loadFilePreview(makeMockFile(10), 'readme.txt', undefined);
+            assert.strictEqual(result.kind, 'text');
+            const lines = result.content.split('\n').filter((l: string) => l.length > 0);
+            assert.strictEqual(lines.length, 10);
+            assert.strictEqual(lines[9], 'line 10');
+        });
+    });
 });
 
 // ---- previewTarFile ----
@@ -164,6 +205,25 @@ describe('Large text preview — TAR', () => {
         assert.ok(result !== null);
         assert.ok(!result.content.includes(`line ${DEFAULT_LINE_COUNT + 1}`));
     });
+
+    it('respects custom previewLineCount = 50 for TAR', async () => {
+        await withLineCount(50, async () => {
+            const result = await provider.previewTarFile('big.txt', path.join(TEST_DIR, 'big-text.tar.gz'));
+            assert.ok(result !== null);
+            assert.strictEqual(result.kind, 'text');
+            const lines = result.content.split('\n').filter((l: string) => l.length > 0);
+            assert.ok(lines.length <= 50, `expected <= 50, got ${lines.length}`);
+            assert.strictEqual(lines[0], 'line 1');
+        });
+    });
+
+    it('TAR last line of default preview is line 20', async () => {
+        const result = await provider.previewTarFile('big.txt', path.join(TEST_DIR, 'big-text.tar.gz'));
+        assert.ok(result !== null);
+        assert.strictEqual(result.kind, 'text');
+        const lines = result.content.split('\n').filter((l: string) => l.length > 0);
+        assert.strictEqual(lines[lines.length - 1], `line ${DEFAULT_LINE_COUNT}`);
+    });
 });
 
 // ---- preview7zFile ----
@@ -191,6 +251,25 @@ describe('Large text preview — 7Z', () => {
         const result = await provider.preview7zFile('big.txt', path.join(TEST_DIR, 'big-text.zip'));
         assert.ok(result !== null);
         assert.ok(!result.content.includes(`line ${DEFAULT_LINE_COUNT + 1}`));
+    });
+
+    it('respects custom previewLineCount = 50 for 7Z', async () => {
+        await withLineCount(50, async () => {
+            const result = await provider.preview7zFile('big.txt', path.join(TEST_DIR, 'big-text.zip'));
+            assert.ok(result !== null);
+            assert.strictEqual(result.kind, 'text');
+            const lines = result.content.split('\n').filter((l: string) => l.length > 0);
+            assert.ok(lines.length <= 50, `expected <= 50, got ${lines.length}`);
+            assert.strictEqual(lines[0], 'line 1');
+        });
+    });
+
+    it('7Z last line of default preview is line 20', async () => {
+        const result = await provider.preview7zFile('big.txt', path.join(TEST_DIR, 'big-text.zip'));
+        assert.ok(result !== null);
+        assert.strictEqual(result.kind, 'text');
+        const lines = result.content.split('\n').filter((l: string) => l.length > 0);
+        assert.strictEqual(lines[lines.length - 1], `line ${DEFAULT_LINE_COUNT}`);
     });
 });
 
