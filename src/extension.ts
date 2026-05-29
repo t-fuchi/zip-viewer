@@ -31,10 +31,13 @@ function getSevenBin() { return _sevenBin ?? (_sevenBin = require('7zip-bin')); 
 
 const pipelineAsync = promisify(pipeline);
 
+type ArchiveListEntry = { path: string; size: number; isDir: boolean };
+
 type PreviewResult =
     | { kind: 'text'; content: string }
     | { kind: 'image'; base64: string; mimeType: string }
-    | { kind: 'markdown'; html: string };
+    | { kind: 'markdown'; html: string }
+    | { kind: 'archive-list'; archiveName: string; entries: ArchiveListEntry[] };
 
 interface ArchiveEntry {
     name: string;
@@ -314,10 +317,10 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
                     const entry: ArchiveEntry = {
                         name: path.basename(data.file),
-                        size: parseInt(data.size) || 0,
-                        time: data.date ? new Date(data.date).getTime() : Date.now(),
-                        date: data.date ? new Date(data.date) : new Date(),
-                        isDirectory: data.attr && data.attr.includes('D')
+                        size: data.size || 0,
+                        time: data.datetime ? data.datetime.getTime() : Date.now(),
+                        date: data.datetime ?? new Date(),
+                        isDirectory: data.attributes ? data.attributes.includes('D') : false
                     };
 
                     this.process7zEntry(entries, data.file, entry);
@@ -610,6 +613,19 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         return Buffer.concat(chunks).toString('utf8');
     }
 
+    private async readZipFileAsBuffer(file: any, password?: string): Promise<Buffer> {
+        const stream = file.stream(password ?? '');
+        const chunks: Buffer[] = [];
+        await new Promise<void>((resolve, reject) => {
+            stream.on('data', (c: Buffer) => chunks.push(c));
+            stream.on('end', resolve);
+            stream.on('error', (err: Error) => {
+                if (err.message !== 'unexpected end of file') reject(err); else resolve();
+            });
+        });
+        return Buffer.concat(chunks);
+    }
+
     private async loadImageFromZip(imagePath: string, archiveFilePath: string, password?: string): Promise<{ base64: string; mimeType: string } | null> {
         try {
             const directory = await getUnzipper().Open.file(archiveFilePath);
@@ -677,6 +693,12 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         return result;
     }
 
+    private isArchiveFile(filename: string): boolean {
+        const ext = this.getExtension(filename);
+        return ['.zip', '.7z', '.tar', '.tar.gz', '.tar.xz', '.tar.bz2',
+                '.tar.Z', '.tar.lz', '.tar.lzma', '.tar.zst'].includes(ext);
+    }
+
     private isImageFile(filename: string): boolean {
         const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico', '.tif', '.tiff', '.avif'];
         const ext = path.extname(filename).toLowerCase();
@@ -722,6 +744,12 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                     const html = await this.renderMarkdownWithImages(content, fileUri,
                         imgPath => this.loadImageFromZip(imgPath, archiveFilePath, pw));
                     return { kind: 'markdown', html };
+                }
+                if (this.isArchiveFile(fileUri)) {
+                    const buf = await this.readZipFileAsBuffer(file, pw);
+                    const innerExt = this.getExtension(fileUri);
+                    const entries = await this.listNestedArchiveEntries(buf, innerExt);
+                    return { kind: 'archive-list', archiveName: path.basename(fileUri), entries };
                 }
                 return this.loadFilePreview(file, fileUri, pw);
             };
@@ -782,7 +810,11 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                     if (password) this.savedPasswords[archiveFilePath] = password;
 
                     let result: PreviewResult;
-                    if (this.isImageFile(fileUri)) {
+                    if (this.isArchiveFile(fileUri)) {
+                        const innerExt = this.getExtension(fileUri);
+                        const entries = await this.listNestedArchiveEntriesFromPath(extractedFilePath, innerExt);
+                        result = { kind: 'archive-list', archiveName: path.basename(fileUri), entries };
+                    } else if (this.isImageFile(fileUri)) {
                         const buf = fs.readFileSync(extractedFilePath);
                         result = { kind: 'image', base64: buf.toString('base64'), mimeType: this.getMimeType(fileUri) };
                     } else if (this.isMarkdownFile(fileUri)) {
@@ -849,12 +881,14 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         }
 
         const isImage = this.isImageFile(fileUri);
+        const isArchive = this.isArchiveFile(fileUri);
         const mimeType = this.getMimeType(fileUri);
 
         return new Promise<PreviewResult | null>((resolve, reject) => {
             const extension = this.getExtension(archiveFilePath);
             const decompressedStream = this.getDecompressionStream(extension, archiveFilePath);
             decompressedStream.on('error', reject);
+            let asyncPending = false;
 
             decompressedStream.pipe(
                 getTar().t({
@@ -863,12 +897,23 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                             const config = vscode.workspace.getConfiguration('zipViewer');
                             const previewLineCount = config.get<number>('previewLineCount') ?? 20;
 
-                            if (isImage) {
+                            if (isArchive || isImage) {
                                 const chunks: Buffer[] = [];
                                 entry.on('data', (chunk: Buffer) => chunks.push(chunk));
-                                entry.on('end', () => {
+                                entry.on('end', async () => {
                                     const buf = Buffer.concat(chunks);
-                                    resolve({ kind: 'image', base64: buf.toString('base64'), mimeType });
+                                    if (isArchive) {
+                                        asyncPending = true;
+                                        try {
+                                            const innerExt = this.getExtension(fileUri);
+                                            const entries = await this.listNestedArchiveEntries(buf, innerExt);
+                                            resolve({ kind: 'archive-list', archiveName: path.basename(fileUri), entries });
+                                        } catch (err) {
+                                            reject(err);
+                                        }
+                                    } else {
+                                        resolve({ kind: 'image', base64: buf.toString('base64'), mimeType });
+                                    }
                                 });
                                 entry.on('error', reject);
                             } else {
@@ -890,7 +935,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                         }
                     }
                 }) as any
-            ).on('finish', () => resolve(null)).on('error', reject);
+            ).on('finish', () => { if (!asyncPending) resolve(null); }).on('error', reject);
         });
     }
 
@@ -1017,9 +1062,102 @@ hr{border:none;border-top:1px solid #555}
 a{color:var(--vscode-textLink-foreground,#4fc1ff)}
 h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
 </style></head><body>${result.html}</body></html>`;
+        } else if (result.kind === 'archive-list') {
+            const rows = result.entries.map(e => {
+                const icon = e.isDir ? '📁' : '📄';
+                const sizeStr = e.isDir ? '' : this.formatBytes(e.size);
+                return `<tr><td style="padding:3px 8px;white-space:nowrap">${icon} ${this.escapeHtml(e.path)}</td><td style="padding:3px 8px;text-align:right;color:#888;white-space:nowrap">${sizeStr}</td></tr>`;
+            }).join('');
+            state.previewPanel.webview.html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';"></head><body style="margin:0;padding:16px;background:#1e1e1e;color:#ccc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px">
+<div style="margin-bottom:12px;font-weight:600;font-size:14px">📦 ${this.escapeHtml(result.archiveName)}</div>
+<div style="margin-bottom:8px;color:#888;font-size:12px">${result.entries.filter(e => !e.isDir).length} files, ${result.entries.filter(e => e.isDir).length} folders</div>
+<table style="width:100%;border-collapse:collapse;font-size:12px">${rows}</table>
+</body></html>`;
         } else {
             state.previewPanel.webview.html = `<html><body style="margin:0;padding:8px;background:#1e1e1e;color:#ccc;font-family:'SF Mono',Consolas,'Courier New',monospace;font-size:13px"><pre style="white-space:pre-wrap;word-break:break-all;margin:0">${this.escapeHtml(result.content)}</pre></body></html>`;
         }
+    }
+
+    private formatBytes(bytes: number): string {
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    private async listZipEntries(buf: Buffer): Promise<ArchiveListEntry[]> {
+        const dir = await getUnzipper().Open.buffer(buf);
+        return dir.files.map((f: any) => ({
+            path: f.path,
+            size: f.uncompressedSize ?? 0,
+            isDir: f.type === 'Directory'
+        }));
+    }
+
+    private async listZipEntriesFromPath(filePath: string): Promise<ArchiveListEntry[]> {
+        const dir = await getUnzipper().Open.file(filePath);
+        return dir.files.map((f: any) => ({
+            path: f.path,
+            size: f.uncompressedSize ?? 0,
+            isDir: f.type === 'Directory'
+        }));
+    }
+
+    private async list7zEntries(archivePath: string): Promise<ArchiveListEntry[]> {
+        return new Promise((resolve, reject) => {
+            const entries: ArchiveListEntry[] = [];
+            const sevenZip = getSeven().list(archivePath, { $bin: this.get7zPath() });
+            sevenZip.on('data', (data: any) => {
+                entries.push({
+                    path: data.file ?? '',
+                    size: data.size ?? 0,
+                    isDir: (data.attributes ?? '').startsWith('D')
+                });
+            });
+            sevenZip.on('end', () => resolve(entries));
+            sevenZip.on('error', reject);
+        });
+    }
+
+    private listTarEntriesFromPath(filePath: string, ext: string): Promise<ArchiveListEntry[]> {
+        return new Promise((resolve, reject) => {
+            const entries: ArchiveListEntry[] = [];
+            const decompressedStream = this.getDecompressionStream(ext, filePath);
+            decompressedStream.on('error', reject);
+            decompressedStream.pipe(
+                getTar().t({
+                    onentry: (entry: any) => {
+                        entries.push({
+                            path: entry.path,
+                            size: entry.size ?? 0,
+                            isDir: entry.type === 'Directory'
+                        });
+                        entry.resume();
+                    }
+                }) as any
+            ).on('finish', () => resolve(entries)).on('error', reject);
+        });
+    }
+
+    private async listNestedArchiveEntries(buf: Buffer, innerExt: string): Promise<ArchiveListEntry[]> {
+        if (innerExt === '.zip') {
+            return this.listZipEntries(buf);
+        }
+        const tempFile = path.join(require('os').tmpdir(), `nested-preview-${Date.now()}${innerExt === '.tar.gz' ? '.tar.gz' : innerExt}`);
+        fs.writeFileSync(tempFile, buf);
+        try {
+            if (innerExt === '.7z') return await this.list7zEntries(tempFile);
+            if (this.isTarFormat(innerExt)) return await this.listTarEntriesFromPath(tempFile, innerExt);
+        } finally {
+            try { fs.unlinkSync(tempFile); } catch (_) { /* ignore cleanup errors */ }
+        }
+        return [];
+    }
+
+    private async listNestedArchiveEntriesFromPath(filePath: string, innerExt: string): Promise<ArchiveListEntry[]> {
+        if (innerExt === '.zip') return this.listZipEntriesFromPath(filePath);
+        if (innerExt === '.7z') return this.list7zEntries(filePath);
+        if (this.isTarFormat(innerExt)) return this.listTarEntriesFromPath(filePath, innerExt);
+        return [];
     }
 
     private escapeHtml(text: string): string {

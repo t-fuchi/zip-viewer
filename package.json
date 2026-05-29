@@ -4,6 +4,10 @@
   "description": "View and extract ZIP, 7Z, TAR, and various compressed archive files",
   "version": "2.1.0",
   "publisher": "Takeshi-Fuchi",
+  "author": {
+    "name": "Takeshi Fuchi",
+    "email": "fuchi@fuchi.com"
+  },
   "icon": "images/icon.png",
   "engines": {
     "vscode": "^1.80.0"

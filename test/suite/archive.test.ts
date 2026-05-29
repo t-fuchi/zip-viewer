@@ -146,6 +146,33 @@ describe('7Z archive loading', () => {
         const names = all.map((e: any) => e.name);
         assert.ok(names.length > 0, 'should have entries');
     });
+
+    it('builds correct directory hierarchy for out.7z', async () => {
+        // out.7z structure:
+        //   out/test/              ← explicit directory entry (D.... attr)
+        //   out/extension.js       ← files directly under out/
+        //   out/test/extension.test.js  ← files nested under out/test/
+        // Regression: data.attr was used instead of data.attributes, causing
+        // isDirectory to always be false and all entries to appear flat.
+        const entries = await provider.load7zEntries(path.join(TEST_DIR, 'out.7z'));
+
+        const out = entries.find((e: any) => e.name === 'out');
+        assert.ok(out, 'out/ should exist at root');
+        assert.strictEqual(out.isDirectory, true, 'out/ should be a directory');
+        assert.ok(Array.isArray(out.children) && out.children.length > 0, 'out/ should have children');
+
+        const test = out.children.find((e: any) => e.name === 'test');
+        assert.ok(test, 'test/ should be inside out/');
+        assert.strictEqual(test.isDirectory, true, 'test/ should be marked as a directory');
+        assert.ok(Array.isArray(test.children) && test.children.length > 0, 'test/ should have children');
+
+        const testNames = test.children.map((e: any) => e.name);
+        assert.ok(testNames.includes('extension.test.js'), 'extension.test.js should be inside out/test/');
+
+        const extensionJs = out.children.find((e: any) => e.name === 'extension.js');
+        assert.ok(extensionJs, 'extension.js should be a direct child of out/, not nested under test/');
+        assert.strictEqual(extensionJs.isDirectory, false, 'extension.js should not be a directory');
+    });
 });
 
 describe('ZIP preview', () => {
@@ -174,6 +201,63 @@ describe('TAR preview', () => {
     it('returns null for non-existent file in tar', async () => {
         const result = await provider.previewTarFile('no/such/file.txt', path.join(TEST_DIR, 'out.tar.gz'));
         assert.strictEqual(result, null);
+    });
+});
+
+// ── Nested archive preview (archive-list) ────────────────────────────────────
+// Regression: previewTarFile resolved(null) because the stream finish event
+// fired before the async listNestedArchiveEntries() completed.
+
+describe('Nested archive preview — zip inside zip', () => {
+    it('returns archive-list kind for out.zip inside tmp.zip', async () => {
+        const result = await provider.previewZipFile('tmp/out.zip', path.join(TEST_DIR, 'tmp.zip'));
+        assert.ok(result !== null, 'should not return null for nested zip');
+        assert.strictEqual(result.kind, 'archive-list', 'should be archive-list kind');
+        assert.strictEqual(result.archiveName, 'out.zip');
+        assert.ok(Array.isArray(result.entries), 'entries should be an array');
+        assert.ok(result.entries.length > 0, 'entries should not be empty');
+    });
+
+    it('entries have path, size, isDir fields', async () => {
+        const result = await provider.previewZipFile('tmp/out.zip', path.join(TEST_DIR, 'tmp.zip'));
+        assert.ok(result !== null);
+        for (const e of result.entries) {
+            assert.ok(typeof e.path === 'string' && e.path.length > 0, 'entry.path should be non-empty string');
+            assert.ok(typeof e.size === 'number', 'entry.size should be number');
+            assert.ok(typeof e.isDir === 'boolean', 'entry.isDir should be boolean');
+        }
+    });
+});
+
+describe('Nested archive preview — zip inside tgz (regression: asyncPending race)', () => {
+    it('returns archive-list kind for out.zip inside tmp.tgz', async () => {
+        // Before the fix, finish fired before await listNestedArchiveEntries()
+        // completed, causing the promise to resolve(null) instead of archive-list.
+        const result = await provider.previewTarFile('tmp/out.zip', path.join(TEST_DIR, 'tmp.tgz'));
+        assert.ok(result !== null, 'should not return null — regression: asyncPending race was not fixed');
+        assert.strictEqual(result.kind, 'archive-list', 'should be archive-list kind');
+        assert.strictEqual(result.archiveName, 'out.zip');
+        assert.ok(Array.isArray(result.entries) && result.entries.length > 0, 'entries should be non-empty');
+    });
+
+    it('entries have expected fields', async () => {
+        const result = await provider.previewTarFile('tmp/out.zip', path.join(TEST_DIR, 'tmp.tgz'));
+        assert.ok(result !== null);
+        for (const e of result.entries) {
+            assert.ok(typeof e.path === 'string' && e.path.length > 0);
+            assert.ok(typeof e.size === 'number');
+            assert.ok(typeof e.isDir === 'boolean');
+        }
+    });
+});
+
+describe('Nested archive preview — zip inside 7z', () => {
+    it('returns archive-list kind for out.zip inside tmp.7z', async () => {
+        const result = await provider.preview7zFile('out.zip', path.join(TEST_DIR, 'tmp.7z'));
+        assert.ok(result !== null, 'should not return null for nested zip in 7z');
+        assert.strictEqual(result.kind, 'archive-list', 'should be archive-list kind');
+        assert.strictEqual(result.archiveName, 'out.zip');
+        assert.ok(Array.isArray(result.entries) && result.entries.length > 0, 'entries should be non-empty');
     });
 });
 
