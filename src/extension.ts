@@ -1034,7 +1034,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
             state.previewPanel = vscode.window.createWebviewPanel(
                 'filePreview',
                 `Preview: ${title}`,
-                vscode.ViewColumn.Beside,
+                { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
                 { enableScripts: false }
             );
 

@@ -10,7 +10,7 @@ A VS Code extension that allows you to browse and extract various compressed arc
 * `.zip` - Including password-protected archives
 
 ### 7-Zip Format
-* `.7z`
+* `.7z` - Including password-protected archives
 
 ### TAR Format (Uncompressed)
 * `.tar`
@@ -39,20 +39,37 @@ A VS Code extension that allows you to browse and extract various compressed arc
 ### LZMA Compressed TAR
 * `.tar.lzma`
 
+### Zstandard Compressed TAR
+* `.tar.zst`
+* `.tzst`
+
 ## Features
 
 ### 📁 File List Display
 * Display file names, sizes, and timestamps
 * Tree view for directory hierarchy
 * Expandable and collapsible folders
+* Folder expand/collapse state is preserved when switching tabs
 
 ### 👁️ File Preview
-* Preview first lines of files on mouse down
-* Close preview on mouse up or mouse leave
+* Mouse down on file names to preview content; release to close
+* Preview first lines of text files
 * Customizable preview line count in settings
 
+### 🖼️ Image Preview
+* Inline preview for JPG, PNG, GIF, WebP, BMP, SVG, ICO, TIFF, and AVIF files
+
+### 📝 Markdown Preview
+* Rendered Markdown preview with inline image rendering
+* Images referenced inside the archive are embedded automatically
+* Click to toggle preview open/closed; navigate between Markdown files with arrow keys
+* Supported in ZIP, TAR, and 7Z formats
+
+### 📦 Nested Archive Preview
+* Clicking an archive file inside an archive (e.g. a `.zip` inside a `.tar.gz`) shows its file listing
+
 ### 🔐 Password Protection Support
-* Support for password-protected ZIP files
+* Support for password-protected ZIP and 7Z files
 * Password remembered for the same file during session
 
 ### 📤 File & Folder Extraction
@@ -66,7 +83,7 @@ A VS Code extension that allows you to browse and extract various compressed arc
 1. Open a compressed file (.zip, .7z, .tar.gz, etc.) in VS Code
 2. The file list will be displayed
 3. Click folder icons to expand hierarchy
-4. Mouse down on file names to preview content
+4. Mouse down on file names to preview content (release to close); click Markdown files to toggle preview and use arrow keys to navigate
 5. Right-click to extract files/folders, or use checkboxes for batch extraction
 
 ## Settings
@@ -93,7 +110,7 @@ This extension operates entirely locally and does not transmit your files or dat
 
 * Very large archive files may take time to load
 * Binary file previews may not display correctly
-* LZO format (.tar.lzo) and Zstandard format (.tar.zst, .tzst) are not currently supported
+* LZO format (`.tar.lzo`) is not currently supported
 
 ## Dependencies
 
@@ -103,6 +120,8 @@ This extension operates entirely locally and does not transmit your files or dat
 * `tar` - TAR format support
 * `lzma-native` - XZ/LZMA compression support
 * `unbzip2-stream` - BZIP2 compression support
+* `@mongodb-js/zstd` - Zstandard compression support
+* `markdown-it` - Markdown rendering
 
 ## License
 
@@ -123,6 +142,13 @@ Zip Viewer does not collect, store, or transmit any user data...
 
 ### 2.1.0
 * Added batch extraction for multiple files and folders
+* Added Markdown preview with inline image rendering (ZIP/TAR/7Z)
+* Added image preview (JPG/PNG/GIF/WebP/BMP/SVG/ICO/TIFF/AVIF)
+* Added Zstandard (`.tar.zst` / `.tzst`) format support
+* Added nested archive file listing (click an archive inside an archive to browse it)
+* Added password protection support for 7Z
+* Markdown preview with click-to-toggle and arrow-key navigation
+* Webview state retention (folder expand/collapse preserved across tab switches)
 * UI improvements and performance optimization
 * Added 7Z format support
 
@@ -134,5 +160,3 @@ Zip Viewer does not collect, store, or transmit any user data...
 ### 1.0.0
 * Initial release
 * Support for ZIP, TAR, TAR.GZ, TAR.XZ, TAR.BZ2
-
-
