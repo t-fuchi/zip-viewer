@@ -2,7 +2,7 @@
 
 A VS Code extension that allows you to browse and extract various compressed archive file formats directly within the editor.
 
-![Demo](images/demo.gif)
+![Demo](https://raw.githubusercontent.com/t-fuchi/zip-viewer/main/images/demo.gif)
 
 ## Supported Formats
 
