@@ -1,9 +1,13 @@
 {
-  "name": "zip-viewer",
-  "displayName": "Zip Viewer",
+  "name": "zip-viewer-fuchi",
+  "displayName": "Zip & Archive Viewer",
   "description": "View and extract ZIP, 7Z, TAR, and various compressed archive files",
   "version": "2.1.0",
   "publisher": "Takeshi-Fuchi",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/t-fuchi/zip-viewer"
+  },
   "author": {
     "name": "Takeshi Fuchi",
     "email": "fuchi@fuchi.com"
