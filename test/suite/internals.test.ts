@@ -9,6 +9,7 @@
  *  - loadImageFromZip()
  *  - readTextFromTar()
  *  - loadImagesFromTar()
+ *  - showPreviewPanel() — image CSP
  */
 
 import * as assert from 'assert';
@@ -286,5 +287,72 @@ describe('loadImagesFromTar', () => {
         assert.strictEqual(result.size, 1);
         assert.ok(result.has('docs/images/logo.png'));
         assert.ok(!result.has('does/not/exist.png'));
+    });
+});
+
+// ── showPreviewPanel — image CSP ─────────────────────────────────────────────
+
+describe('showPreviewPanel — image preview HTML', () => {
+    it('includes Content-Security-Policy allowing data: URIs for images', () => {
+        const fakeVscode = require('vscode');
+        let capturedHtml = '';
+        const origCreate = fakeVscode.window.createWebviewPanel;
+        fakeVscode.window.createWebviewPanel = (_vt: string, title: string, _col: any, _opts?: any) => ({
+            webview: {
+                options: {},
+                onDidReceiveMessage: () => ({ dispose: () => {} }),
+                get html() { return capturedHtml; },
+                set html(v: string) { capturedHtml = v; }
+            },
+            title,
+            onDidDispose: (_cb: () => void) => ({ dispose: () => {} }),
+            dispose: () => {},
+            reveal: () => {}
+        });
+
+        const state: any = {
+            archiveFilePath: '/fake/archive.zip',
+            archiveEntries: [],
+            previewPanel: undefined,
+            previewRequestId: 0
+        };
+        provider.showPreviewPanel('test.png', { kind: 'image', base64: 'abc', mimeType: 'image/png' }, state);
+
+        fakeVscode.window.createWebviewPanel = origCreate;
+
+        assert.ok(capturedHtml.includes('Content-Security-Policy'), 'should include CSP meta tag');
+        assert.ok(
+            capturedHtml.includes('img-src data:') || capturedHtml.includes("img-src 'self' data:"),
+            'CSP should allow data: URIs for img-src'
+        );
+    });
+
+    it('image src uses data URI with correct mimeType', () => {
+        const fakeVscode = require('vscode');
+        let capturedHtml = '';
+        fakeVscode.window.createWebviewPanel = (_vt: string, title: string, _col: any, _opts?: any) => ({
+            webview: {
+                get html() { return capturedHtml; },
+                set html(v: string) { capturedHtml = v; },
+                options: {},
+                onDidReceiveMessage: () => ({ dispose: () => {} })
+            },
+            title,
+            onDidDispose: () => ({ dispose: () => {} }),
+            dispose: () => {},
+            reveal: () => {}
+        });
+
+        const state: any = {
+            archiveFilePath: '/fake/archive.zip',
+            archiveEntries: [],
+            previewPanel: undefined,
+            previewRequestId: 0
+        };
+        provider.showPreviewPanel('test.png', { kind: 'image', base64: 'dGVzdA==', mimeType: 'image/png' }, state);
+
+        fakeVscode.window.createWebviewPanel = require('vscode').window.createWebviewPanel;
+
+        assert.ok(capturedHtml.includes('data:image/png;base64,dGVzdA=='), 'img src should be a data URI');
     });
 });

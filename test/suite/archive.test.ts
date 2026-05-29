@@ -108,6 +108,30 @@ describe('TAR archive loading', () => {
         const names = all.map((e: any) => e.name);
         assert.ok(names.includes('extension.js'), 'should contain extension.js');
     });
+
+    it('builds correct directory hierarchy for tar with implicit dirs', async () => {
+        // markdown-with-images.tar.gz has no explicit dir entries:
+        //   docs/readme.md, docs/images/logo.png, docs/images/icon.png
+        // processTarEntry must infer intermediate dirs as isDirectory:true
+        const entries = await provider.loadTarEntries(path.join(TEST_DIR, 'markdown-with-images.tar.gz'));
+        const docs = entries.find((e: any) => e.name === 'docs');
+        assert.ok(docs, 'docs directory should exist at root');
+        assert.strictEqual(docs.isDirectory, true, 'docs should be marked as directory');
+        assert.ok(Array.isArray(docs.children) && docs.children.length > 0, 'docs should have children');
+
+        const readme = docs.children.find((e: any) => e.name === 'readme.md');
+        assert.ok(readme, 'readme.md should be inside docs');
+        assert.strictEqual(readme.isDirectory, false, 'readme.md should not be a directory');
+
+        const images = docs.children.find((e: any) => e.name === 'images');
+        assert.ok(images, 'images directory should be inside docs');
+        assert.strictEqual(images.isDirectory, true, 'images should be marked as directory');
+        assert.ok(Array.isArray(images.children) && images.children.length > 0, 'images should have children');
+
+        const childNames = images.children.map((e: any) => e.name);
+        assert.ok(childNames.includes('logo.png'), 'logo.png should be inside images');
+        assert.ok(childNames.includes('icon.png'), 'icon.png should be inside images');
+    });
 });
 
 describe('7Z archive loading', () => {

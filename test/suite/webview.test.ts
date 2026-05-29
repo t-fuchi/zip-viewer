@@ -544,3 +544,25 @@ describe('Webview: Select All / Clear Selection', () => {
         assert.strictEqual(btn.disabled, false);
     });
 });
+
+// ---- Provider registration ----
+
+describe('Provider registration', () => {
+    it('registers with retainContextWhenHidden: true', () => {
+        const fakeVscode = require('vscode');
+        const mod = require('../../src/extension');
+        let capturedOptions: any;
+        const orig = fakeVscode.window.registerCustomEditorProvider;
+        fakeVscode.window.registerCustomEditorProvider = (_id: string, _p: any, opts: any) => {
+            capturedOptions = opts;
+            return { dispose: () => {} };
+        };
+        mod.activate({ subscriptions: [] });
+        fakeVscode.window.registerCustomEditorProvider = orig;
+        assert.strictEqual(
+            capturedOptions?.webviewOptions?.retainContextWhenHidden,
+            true,
+            'retainContextWhenHidden must be true to prevent Loading... flash on tab switch'
+        );
+    });
+});
