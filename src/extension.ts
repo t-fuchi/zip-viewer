@@ -361,7 +361,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         let currentLevel = entries;
 
         parts.forEach((part, index) => {
-            if (!part.trim()) return;
+            if (!part.trim() || part === '.' || part === '..') return;
 
             let existing = currentLevel.find(e => e.name === part);
             if (!existing) {
@@ -476,7 +476,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         let currentLevel = entries;
 
         parts.forEach((part, index) => {
-            if (!part.trim()) return;
+            if (!part.trim() || part === '.' || part === '..') return;
 
             const isIntermediate = index < parts.length - 1;
             let existing = currentLevel.find(e => e.name === part);
@@ -510,7 +510,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
             let currentLevel = root;
 
             parts.forEach((part: string, index: number) => {
-                if (!part.trim()) {
+                if (!part.trim() || part === '.' || part === '..') {
                     return;
                 }
 
