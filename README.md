@@ -140,6 +140,15 @@ Zip Viewer does not collect, store, or transmit any user data...
 
 ## Version History
 
+### 2.1.3
+* Filter out `.` and `..` entries from archive file listing (ZIP/TAR/7Z)
+
+### 2.1.2
+* Fix demo.gif URL in README
+
+### 2.1.1
+* Update extension name and add repository field
+
 ### 2.1.0
 * Added batch extraction for multiple files and folders
 * Added Markdown preview with inline image rendering (ZIP/TAR/7Z)
