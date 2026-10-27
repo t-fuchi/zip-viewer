@@ -33,7 +33,9 @@ module.exports = {
         'tar': 'commonjs tar',
         'node-7z': 'commonjs node-7z',
         'unbzip2-stream': 'commonjs unbzip2-stream',
-        'unzipper': 'commonjs unzipper'
+        'unzipper': 'commonjs unzipper',
+        'mammoth': 'commonjs mammoth',
+        'jszip': 'commonjs jszip'
     },
     resolve: {
         extensions: ['.ts', '.js']

@@ -124,3 +124,6 @@ tsconfig.test.json
 make_icon.py
 out/**
 dist/extension.js.map
+# mammoth / jszip are external (lazy-loaded); keep their runtime files
+!node_modules/dingbat-to-unicode/dist/**
+article_*.md
