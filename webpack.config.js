@@ -1,4 +1,18 @@
 const path = require('path');
+const fs = require('fs');
+
+// Copy pdf.js runtime files into media/ so the PDF preview webview can load them.
+(function copyPdfjs() {
+    const src = path.resolve(__dirname, 'node_modules/pdfjs-dist');
+    const dest = path.resolve(__dirname, 'media');
+    fs.mkdirSync(dest, { recursive: true });
+    for (const f of ['pdf.min.js', 'pdf.worker.min.js']) {
+        fs.copyFileSync(path.join(src, 'build', f), path.join(dest, f));
+    }
+    for (const d of ['cmaps', 'standard_fonts']) {
+        fs.cpSync(path.join(src, d), path.join(dest, d), { recursive: true });
+    }
+})();
 
 module.exports = {
     target: 'node',

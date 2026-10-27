@@ -9,6 +9,7 @@ import { spawn } from 'child_process';
 import type * as tarType from 'tar';
 import type * as unzipperType from 'unzipper';
 import type * as SevenType from 'node-7z';
+import { getDocumentKind, renderOfficeBody, OFFICE_PAGE_STYLE, MAX_DOCUMENT_BYTES } from './documentPreview';
 
 // Heavy/native modules — lazy-loaded on first use to keep activation fast.
 let _sevenBinPath: string | null = null;
@@ -37,6 +38,8 @@ type PreviewResult =
     | { kind: 'text'; content: string }
     | { kind: 'image'; base64: string; mimeType: string }
     | { kind: 'markdown'; html: string }
+    | { kind: 'pdf'; base64: string }
+    | { kind: 'office'; html: string }
     | { kind: 'archive-list'; archiveName: string; entries: ArchiveListEntry[] };
 
 interface ArchiveEntry {
@@ -52,6 +55,7 @@ interface DocumentState {
     archiveFilePath: string;
     archiveEntries: ArchiveEntry[];
     previewPanel: vscode.WebviewPanel | undefined;
+    previewPanelScripts?: boolean;
     previewRequestId: number;
     zipDirectory?: any;
 }
@@ -718,6 +722,25 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         return map[ext] ?? 'application/octet-stream';
     }
 
+    private isDocumentFile(filename: string): boolean {
+        return getDocumentKind(filename) !== undefined;
+    }
+
+    private async renderDocument(buf: Buffer, filename: string): Promise<PreviewResult> {
+        const kind = getDocumentKind(filename)!;
+        if (buf.length > MAX_DOCUMENT_BYTES) {
+            return { kind: 'text', content: `File is too large to preview (${this.formatBytes(buf.length)}).` };
+        }
+        if (kind === 'pdf') {
+            return { kind: 'pdf', base64: buf.toString('base64') };
+        }
+        try {
+            return { kind: 'office', html: await renderOfficeBody(buf, kind) };
+        } catch (err) {
+            return { kind: 'text', content: `Cannot preview ${path.basename(filename)}: ${err instanceof Error ? err.message : String(err)}` };
+        }
+    }
+
     private async previewFile(fileUri: string, archiveFilePath: string, state?: DocumentState): Promise<PreviewResult | null> {
         const extension = this.getExtension(archiveFilePath);
         if (extension === '.zip') {
@@ -750,6 +773,10 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                     const innerExt = this.getExtension(fileUri);
                     const entries = await this.listNestedArchiveEntries(buf, innerExt);
                     return { kind: 'archive-list', archiveName: path.basename(fileUri), entries };
+                }
+                if (this.isDocumentFile(fileUri)) {
+                    const buf = await this.readZipFileAsBuffer(file, pw);
+                    return this.renderDocument(buf, fileUri);
                 }
                 return this.loadFilePreview(file, fileUri, pw);
             };
@@ -817,6 +844,8 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                     } else if (this.isImageFile(fileUri)) {
                         const buf = fs.readFileSync(extractedFilePath);
                         result = { kind: 'image', base64: buf.toString('base64'), mimeType: this.getMimeType(fileUri) };
+                    } else if (this.isDocumentFile(fileUri)) {
+                        result = await this.renderDocument(fs.readFileSync(extractedFilePath), fileUri);
                     } else if (this.isMarkdownFile(fileUri)) {
                         const mdContent = fs.readFileSync(extractedFilePath, 'utf8');
                         const imageRefs = this.extractImageRefs(mdContent, fileUri);
@@ -882,6 +911,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
         const isImage = this.isImageFile(fileUri);
         const isArchive = this.isArchiveFile(fileUri);
+        const isDocument = this.isDocumentFile(fileUri);
         const mimeType = this.getMimeType(fileUri);
 
         return new Promise<PreviewResult | null>((resolve, reject) => {
@@ -897,7 +927,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                             const config = vscode.workspace.getConfiguration('zipViewer');
                             const previewLineCount = config.get<number>('previewLineCount') ?? 20;
 
-                            if (isArchive || isImage) {
+                            if (isArchive || isImage || isDocument) {
                                 const chunks: Buffer[] = [];
                                 entry.on('data', (chunk: Buffer) => chunks.push(chunk));
                                 entry.on('end', async () => {
@@ -911,6 +941,9 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                                         } catch (err) {
                                             reject(err);
                                         }
+                                    } else if (isDocument) {
+                                        asyncPending = true;
+                                        this.renderDocument(buf, fileUri).then(resolve, reject);
                                     } else {
                                         resolve({ kind: 'image', base64: buf.toString('base64'), mimeType });
                                     }
@@ -1030,22 +1063,39 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
     }
 
     private showPreviewPanel(title: string, result: PreviewResult, state: DocumentState) {
+        // Scripts are only enabled for PDF (pdf.js); all other kinds render static HTML.
+        const needsScripts = result.kind === 'pdf';
+        if (state.previewPanel && state.previewPanelScripts !== needsScripts) {
+            const old = state.previewPanel;
+            state.previewPanel = undefined;
+            old.dispose();
+        }
         if (!state.previewPanel) {
-            state.previewPanel = vscode.window.createWebviewPanel(
+            const panel = vscode.window.createWebviewPanel(
                 'filePreview',
                 `Preview: ${title}`,
                 { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
-                { enableScripts: false }
+                needsScripts
+                    ? { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')] }
+                    : { enableScripts: false }
             );
+            state.previewPanel = panel;
+            state.previewPanelScripts = needsScripts;
 
-            state.previewPanel.onDidDispose(() => {
-                state.previewPanel = undefined;
+            panel.onDidDispose(() => {
+                if (state.previewPanel === panel) {
+                    state.previewPanel = undefined;
+                }
             });
         }
 
         state.previewPanel.title = `Preview: ${title}`;
         if (result.kind === 'image') {
             state.previewPanel.webview.html = `<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:;"></head><body style="margin:0;background:#1e1e1e;display:flex;justify-content:center;align-items:center;min-height:100vh;"><img src="data:${result.mimeType};base64,${result.base64}" style="max-width:100%;max-height:100vh;object-fit:contain;"></body></html>`;
+        } else if (result.kind === 'pdf') {
+            state.previewPanel.webview.html = this.getPdfHtml(state.previewPanel.webview, result.base64);
+        } else if (result.kind === 'office') {
+            state.previewPanel.webview.html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline';"><style>${OFFICE_PAGE_STYLE}</style></head><body>${result.html}</body></html>`;
         } else if (result.kind === 'markdown') {
             state.previewPanel.webview.html = `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><style>
@@ -1076,6 +1126,51 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
         } else {
             state.previewPanel.webview.html = `<html><body style="margin:0;padding:8px;background:#1e1e1e;color:#ccc;font-family:'SF Mono',Consolas,'Courier New',monospace;font-size:13px"><pre style="white-space:pre-wrap;word-break:break-all;margin:0">${this.escapeHtml(result.content)}</pre></body></html>`;
         }
+    }
+
+    private getPdfHtml(webview: vscode.Webview, base64: string): string {
+        const media = (name: string) => webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', name)).toString();
+        const nonce = crypto.randomBytes(16).toString('hex');
+        const csp = `default-src 'none'; script-src 'nonce-${nonce}' ${webview.cspSource}; worker-src blob: ${webview.cspSource}; connect-src ${webview.cspSource}; img-src data: blob:; style-src 'unsafe-inline';`;
+        return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}">
+<style>body{margin:0;padding:8px;background:#525659;color:#ddd;font-family:sans-serif;font-size:13px}canvas{display:block;margin:0 auto 8px;max-width:100%;height:auto!important;box-shadow:0 1px 4px rgba(0,0,0,.5);background:#fff}#msg{padding:8px}</style></head>
+<body><div id="msg">Loading PDF...</div><div id="pages"></div>
+<script nonce="${nonce}" src="${media('pdf.min.js')}"></script>
+<script nonce="${nonce}">
+(async () => {
+  const msg = document.getElementById('msg');
+  const MAX_PAGES = 100;
+  try {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "${media('pdf.worker.min.js')}";
+    const bin = atob("${base64}");
+    const data = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) data[i] = bin.charCodeAt(i);
+    const pdf = await pdfjsLib.getDocument({
+      data,
+      cMapUrl: "${media('cmaps/')}", cMapPacked: true,
+      standardFontDataUrl: "${media('standard_fonts/')}"
+    }).promise;
+    const count = Math.min(pdf.numPages, MAX_PAGES);
+    msg.textContent = pdf.numPages + ' page(s)' + (pdf.numPages > MAX_PAGES ? ' (showing first ' + MAX_PAGES + ')' : '');
+    const container = document.getElementById('pages');
+    const dpr = window.devicePixelRatio || 1;
+    for (let n = 1; n <= count; n++) {
+      const page = await pdf.getPage(n);
+      const base = page.getViewport({ scale: 1 });
+      const scale = Math.min(2, Math.max(0.5, (document.body.clientWidth - 16) / base.width)) * dpr;
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      canvas.style.width = (viewport.width / dpr) + 'px';
+      container.appendChild(canvas);
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+    }
+  } catch (e) {
+    msg.textContent = 'Cannot preview PDF: ' + (e && e.message ? e.message : e);
+  }
+})();
+</script></body></html>`;
     }
 
     private formatBytes(bytes: number): string {

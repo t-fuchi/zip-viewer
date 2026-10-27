@@ -3,3 +3,9 @@ node_modules/
 out/
 dist/
 .DS_Store
+
+# local / junk
+.claude/settings.local.json
+/webpack
+.vscodeignore copy
+media/
