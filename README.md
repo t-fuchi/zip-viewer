@@ -59,6 +59,14 @@ A VS Code extension that allows you to browse and extract various compressed arc
 ### 🖼️ Image Preview
 * Inline preview for JPG, PNG, GIF, WebP, BMP, SVG, ICO, TIFF, and AVIF files
 
+### 📄 PDF & Office Preview
+* PDF files are rendered page by page (up to 100 pages) with pdf.js
+* Word (`.docx`) is converted to formatted HTML
+* Excel (`.xlsx`) is shown as tables per sheet (first 500 rows / 60 columns; dates appear as raw numbers)
+* PowerPoint (`.pptx`) shows the text of each slide
+* Files larger than 50 MB are not previewed
+* Supported in ZIP, TAR, and 7Z formats
+
 ### 📝 Markdown Preview
 * Rendered Markdown preview with inline image rendering
 * Images referenced inside the archive are embedded automatically
@@ -110,6 +118,8 @@ This extension operates entirely locally and does not transmit your files or dat
 
 * Very large archive files may take time to load
 * Binary file previews may not display correctly
+* Legacy Office formats (`.doc`, `.xls`, `.ppt`) are not previewed
+* PPTX preview shows text only (no layout or images)
 * LZO format (`.tar.lzo`) is not currently supported
 
 ## Dependencies
@@ -122,6 +132,9 @@ This extension operates entirely locally and does not transmit your files or dat
 * `unbzip2-stream` - BZIP2 compression support
 * `@mongodb-js/zstd` - Zstandard compression support
 * `markdown-it` - Markdown rendering
+* `pdfjs-dist` - PDF rendering
+* `mammoth` - DOCX conversion
+* `jszip` - XLSX/PPTX parsing
 
 ## License
 
@@ -139,6 +152,10 @@ Zip Viewer does not collect, store, or transmit any user data...
 
 
 ## Version History
+
+### 2.2.0
+* Added PDF preview (pdf.js) for files inside archives
+* Added Office preview: Word (`.docx`), Excel (`.xlsx`), PowerPoint (`.pptx`)
 
 ### 2.1.3
 * Filter out `.` and `..` entries from archive file listing (ZIP/TAR/7Z)

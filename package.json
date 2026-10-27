@@ -2,7 +2,7 @@
   "name": "zip-viewer-fuchi",
   "displayName": "Zip & Archive Viewer",
   "description": "View and extract ZIP, 7Z, TAR, and various compressed archive files",
-  "version": "2.1.3",
+  "version": "2.2.0",
   "publisher": "Takeshi-Fuchi",
   "repository": {
     "type": "git",
@@ -98,10 +98,10 @@
   },
   "scripts": {
     "vscode:prepublish": "chmod +x node_modules/7zip-bin/mac/arm64/7za node_modules/7zip-bin/mac/x64/7za node_modules/7zip-bin/linux/arm/7za node_modules/7zip-bin/linux/arm64/7za node_modules/7zip-bin/linux/ia32/7za node_modules/7zip-bin/linux/x64/7za 2>/dev/null; npm run package",
-    "compile": "webpack && cat dist/extension.js > $HOME/.vscode/extensions/takeshi-fuchi.zip-viewer-2.1.0/dist/extension.js && cp -R media $HOME/.vscode/extensions/takeshi-fuchi.zip-viewer-2.1.0/",
+    "compile": "webpack && cat dist/extension.js > \"${ZIP_VIEWER_DEV_DIR:-$HOME/.vscode/extensions/takeshi-fuchi.zip-viewer-2.1.0}/dist/extension.js\" && cp -R media \"${ZIP_VIEWER_DEV_DIR:-$HOME/.vscode/extensions/takeshi-fuchi.zip-viewer-2.1.0}/\"",
     "watch": "webpack --watch",
     "package": "webpack --mode production --devtool hidden-source-map",
-    "deploy": "npm run package && cat dist/extension.js > $HOME/.vscode/extensions/takeshi-fuchi.zip-viewer-2.1.0/dist/extension.js && cp -R media $HOME/.vscode/extensions/takeshi-fuchi.zip-viewer-2.1.0/ && echo 'Deployed. Reload Window in VS Code to apply.'",
+    "deploy": "npm run package && cat dist/extension.js > \"${ZIP_VIEWER_DEV_DIR:-$HOME/.vscode/extensions/takeshi-fuchi.zip-viewer-2.1.0}/dist/extension.js\" && cp -R media \"${ZIP_VIEWER_DEV_DIR:-$HOME/.vscode/extensions/takeshi-fuchi.zip-viewer-2.1.0}/\" && echo 'Deployed. Reload Window in VS Code to apply.'",
     "test": "TS_NODE_PROJECT=tsconfig.test.json mocha",
     "test:unit": "TS_NODE_PROJECT=tsconfig.test.json mocha --spec test/suite/utils.test.ts",
     "test:archive": "TS_NODE_PROJECT=tsconfig.test.json mocha --spec test/suite/archive.test.ts",
