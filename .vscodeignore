@@ -127,3 +127,6 @@ dist/extension.js.map
 # mammoth / jszip are external (lazy-loaded); keep their runtime files
 !node_modules/dingbat-to-unicode/dist/**
 article_*.md
+
+# pdf.js runtime files are copied to media/ at build time
+node_modules/pdfjs-dist/**
