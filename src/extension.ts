@@ -722,6 +722,32 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
         return map[ext] ?? 'application/octet-stream';
     }
 
+    // Decode preview bytes: UTF-8 first, Shift_JIS as fallback; binary data is not shown as text.
+    private decodeTextPreview(buf: Buffer, lineCount: number): string {
+        if (buf.subarray(0, 8192).includes(0)) {
+            return '(Binary file: preview not available)';
+        }
+        // Cut at a line boundary first so a multibyte character split by the stream end can't break decoding.
+        let seen = 0;
+        for (let i = 0; i < buf.length; i++) {
+            if (buf[i] === 10 && ++seen === lineCount) {
+                buf = buf.subarray(0, i);
+                break;
+            }
+        }
+        let text: string;
+        try {
+            text = new TextDecoder('utf-8', { fatal: true }).decode(buf);
+        } catch {
+            try {
+                text = new TextDecoder('shift_jis').decode(buf);
+            } catch {
+                text = buf.toString();
+            }
+        }
+        return text.split('\n').slice(0, lineCount).join('\n');
+    }
+
     private isDocumentFile(filename: string): boolean {
         return getDocumentKind(filename) !== undefined;
     }
@@ -869,8 +895,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                         });
                         result = { kind: 'markdown', html };
                     } else {
-                        const content = fs.readFileSync(extractedFilePath, 'utf8');
-                        result = { kind: 'text', content: content.split('\n').slice(0, previewLineCount).join('\n') };
+                        result = { kind: 'text', content: this.decodeTextPreview(fs.readFileSync(extractedFilePath), previewLineCount) };
                     }
                     fs.rmSync(tempDir, { recursive: true, force: true });
                     return result;
@@ -950,18 +975,18 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
                                 });
                                 entry.on('error', reject);
                             } else {
-                                let content = '';
+                                const textChunks: Buffer[] = [];
                                 let lines = 0;
                                 entry.on('data', (chunk: Buffer) => {
-                                    content += chunk.toString();
-                                    lines = (content.match(/\n/g) || []).length;
+                                    textChunks.push(chunk);
+                                    for (const byte of chunk) { if (byte === 10) lines++; }
                                     if (lines >= previewLineCount) {
                                         entry.destroy();
-                                        resolve({ kind: 'text', content: content.split('\n').slice(0, previewLineCount).join('\n') });
+                                        resolve({ kind: 'text', content: this.decodeTextPreview(Buffer.concat(textChunks), previewLineCount) });
                                     }
                                 });
                                 entry.on('end', () => {
-                                    resolve({ kind: 'text', content: content.split('\n').slice(0, previewLineCount).join('\n') });
+                                    resolve({ kind: 'text', content: this.decodeTextPreview(Buffer.concat(textChunks), previewLineCount) });
                                 });
                                 entry.on('error', reject);
                             }
@@ -994,14 +1019,14 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
             return { kind: 'image', base64: buf.toString('base64'), mimeType: this.getMimeType(fileUri) };
         }
 
-        let content = '';
+        const chunks: Buffer[] = [];
         let lines = 0;
 
         try {
             await new Promise<void>((resolve, reject) => {
-                stream.on('data', (chunk: any) => {
-                    content += chunk.toString();
-                    lines = (content.match(/\n/g) || []).length;
+                stream.on('data', (chunk: Buffer) => {
+                    chunks.push(chunk);
+                    for (const byte of chunk) { if (byte === 10) lines++; }
                     if (lines >= previewLineCount) {
                         stream.destroy();
                         resolve();
@@ -1026,7 +1051,7 @@ class ArchiveFileEditorProvider implements vscode.CustomReadonlyEditorProvider {
             }
         }
 
-        return { kind: 'text', content: content.split('\n').slice(0, previewLineCount).join('\n') };
+        return { kind: 'text', content: this.decodeTextPreview(Buffer.concat(chunks), previewLineCount) };
     }
 
     private async checkPassword(file: any, password: string): Promise<boolean> {
@@ -1136,9 +1161,12 @@ h1,h2{border-bottom:1px solid #444;padding-bottom:.3em}
 <style>body{margin:0;padding:8px;background:#525659;color:#ddd;font-family:sans-serif;font-size:13px}canvas{display:block;margin:0 auto 8px;max-width:100%;height:auto!important;box-shadow:0 1px 4px rgba(0,0,0,.5);background:#fff}#msg{padding:8px}</style></head>
 <body><div id="msg">Loading PDF...</div><div id="pages"></div>
 <script nonce="${nonce}" src="${media('pdf.min.js')}"></script>
+<script nonce="${nonce}" src="${media('pdf.worker.min.js')}"></script>
 <script nonce="${nonce}">
 (async () => {
   const msg = document.getElementById('msg');
+  window.addEventListener('error', e => { msg.textContent = 'Cannot preview PDF: ' + e.message; });
+  window.addEventListener('unhandledrejection', e => { msg.textContent = 'Cannot preview PDF: ' + (e.reason && e.reason.message || e.reason); });
   const MAX_PAGES = 100;
   try {
     pdfjsLib.GlobalWorkerOptions.workerSrc = "${media('pdf.worker.min.js')}";

@@ -28,3 +28,34 @@ describe('documentPreview', () => {
         assert.ok(html.indexOf('One') < html.indexOf('Two'));
     });
 });
+
+describe('decodeTextPreview', () => {
+    let provider: any;
+    before(() => {
+        const fakeVscode = require('vscode');
+        const mod = require('../../src/extension');
+        let captured: any;
+        const orig = fakeVscode.window.registerCustomEditorProvider;
+        fakeVscode.window.registerCustomEditorProvider = (_id: string, p: any) => { captured = p; return { dispose: () => {} }; };
+        mod.activate({ subscriptions: [] });
+        fakeVscode.window.registerCustomEditorProvider = orig;
+        provider = new captured.constructor({ subscriptions: [] });
+    });
+
+    it('decodes UTF-8', () => {
+        assert.strictEqual(provider.decodeTextPreview(Buffer.from('日本語\nabc\n'), 1), '日本語');
+    });
+
+    it('falls back to Shift_JIS', () => {
+        assert.strictEqual(provider.decodeTextPreview(Buffer.from('82a082a2', 'hex'), 5), 'あい');
+    });
+
+    it('does not break on a multibyte character cut at the end', () => {
+        const full = Buffer.from('日本語\nあ');
+        assert.strictEqual(provider.decodeTextPreview(full.subarray(0, full.length - 1), 1), '日本語');
+    });
+
+    it('reports binary data instead of garbage', () => {
+        assert.ok(provider.decodeTextPreview(Buffer.from([0xd0, 0xcf, 0x11, 0, 0, 1]), 5).includes('Binary'));
+    });
+});
